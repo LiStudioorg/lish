@@ -1,11 +1,11 @@
 /**
- * Session: event-sourced conversation state.
+ * Session：基于事件溯源的会话状态。
  *
- * The only source of truth is an append-only JSONL log. Nothing derived (such
- * as the LLM message list) is ever mutated in place: it is recomputed by
- * folding the log, so the projection can always be rebuilt from scratch.
+ * 唯一真源是一条**只追加（append-only）的 JSONL 日志**。
+ * 任何派生数据（例如发给 LLM 的消息列表）都不会被就地修改：
+ * 它们每次都通过对日志做 fold（折叠）重新计算，因此投影随时可以从零重建。
  *
- * Log format: one JSON object per line, each with at least `type` and `seq`.
+ * 日志格式：每行一个 JSON 对象，至少包含 `type` 与 `seq`。
  */
 
 import { appendFile, mkdir, readFile, writeFile } from "node:fs/promises";
@@ -17,49 +17,56 @@ import {
   type ToolResult,
 } from "./llm.js";
 
-// --- Event types ----------------------------------------------------------
+// --- 事件类型 -------------------------------------------------------------
 
 export interface SessionEventBase {
-  /** Monotonic sequence number, assigned by the session. */
+  /** 单调递增序号，由 Session 统一盖章。 */
   seq: number;
-  /** Wall-clock time in ms. */
+  /** 墙上时钟时间（毫秒）。 */
   ts: number;
+  /** 事件类型。 */
   type: string;
 }
 
+/** 会话创建事件。 */
 export interface SessionCreatedEvent extends SessionEventBase {
   type: "session.created";
   sessionId: string;
   title?: string;
 }
 
+/** 用户消息事件。 */
 export interface UserMessageEvent extends SessionEventBase {
   type: "message.user";
   content: string;
 }
 
+/** 系统提示（system prompt）消息事件。 */
 export interface SystemMessageEvent extends SessionEventBase {
   type: "message.system";
   content: string;
 }
 
+/** 助手消息事件（可能同时带文本与工具调用）。 */
 export interface AssistantMessageEvent extends SessionEventBase {
   type: "message.assistant";
   content?: string;
   toolCalls?: ToolCall[];
 }
 
+/** 工具执行结果事件。 */
 export interface ToolResultEvent extends SessionEventBase {
   type: "tool.result";
   tool: ToolResult;
 }
 
+/** LLM Provider 切换事件（记录在会话时间线上）。 */
 export interface ProviderChangedEvent extends SessionEventBase {
   type: "llm.provider-changed";
   provider?: string;
 }
 
-/** Escape hatch so applications can log domain events on the same timeline. */
+/** 逃生舱口：应用可在同一时间线上记录自定义领域事件。 */
 export interface CustomEvent extends SessionEventBase {
   type: string;
   [key: string]: unknown;
@@ -70,55 +77,53 @@ export type AnySessionEvent = { seq: number; ts: number; type: string } & Record
   unknown
 >;
 
-/** Events that project into LLM messages. */
+/** 会被投影成 LLM 消息的事件集合。 */
 export type MessageEvent =
   | UserMessageEvent
   | SystemMessageEvent
   | AssistantMessageEvent
   | ToolResultEvent;
 
-// --- Options --------------------------------------------------------------
+// --- 配置选项 -------------------------------------------------------------
 
 export interface SessionOptions {
-  /** Explicit id; otherwise generated. */
+  /** 显式指定 id；否则自动生成。 */
   id?: string;
   title?: string;
-  /** Optional JSONL file to mirror every append into. */
+  /** 可选的 JSONL 文件，每次 append 都会镜像写入其中。 */
   file?: string;
-  /** Clock injection for deterministic tests. */
+  /** 时钟注入，便于写出确定性的测试。 */
   now?: () => number;
-  /** Whether to record the `session.created` event. Defaults to true. */
+  /** 是否记录 `session.created` 事件，默认 true。 */
   emitCreated?: boolean;
   /**
-   * Strict log parsing. When true, a malformed / truncated JSONL line makes
-   * `Session.load` throw instead of being skipped. Defaults to false so a
-   * crashed process can still be recovered.
+   * 严格解析模式。为 true 时，遇到损坏/截断的 JSONL 行会让 `Session.load`
+   * 直接抛错，而不是跳过该行。默认 false，以便进程崩溃后仍能尽量恢复。
    */
   strict?: boolean;
 }
 
-/** Options for the `deriveMessages` projection. */
+/** `deriveMessages` 投影的选项。 */
 export interface DeriveOptions {
   /**
-   * Merge every system message into a single leading message. Real provider
-   * APIs generally accept one system prompt, first in the list. Defaults to
-   * false (system messages stay in log order).
+   * 把所有 system 消息合并为一条并置于数组最前。真实厂商 API 通常只接受
+   * 一条 system prompt 且必须排在最前。默认 false（保持日志中的原始顺序）。
    */
   hoistSystem?: boolean;
 }
 
-// --- Session --------------------------------------------------------------
+// --- Session 主体 ---------------------------------------------------------
 
 export class Session {
   readonly id: string;
   readonly title?: string;
-  /** Whether malformed log lines are fatal on load. */
+  /** 加载时坏行是否视为致命错误。 */
   readonly strict: boolean;
 
   private readonly events: AnySessionEvent[] = [];
   private readonly file?: string;
   private readonly now: () => number;
-  /** Serialises file writes so concurrent appends cannot interleave lines. */
+  /** 串行化文件写入，避免并发 append 导致行交错。 */
   private writeChain: Promise<void> = Promise.resolve();
   private seq = 0;
 
@@ -135,10 +140,10 @@ export class Session {
   }
 
   /**
-   * Append one event.
+   * 追加一个事件。
    *
-   * `seq` and `ts` are stamped by the session and override anything the caller
-   * passes, so the log stays internally consistent. Returns the stored event.
+   * `seq` 与 `ts` 由 Session 统一盖章，会覆盖调用方传入的值，
+   * 以保证日志自身的一致性。返回实际存储的事件。
    */
   append<T extends { type: string }>(event: T): T & { seq: number; ts: number } {
     if (!event || typeof event.type !== "string" || event.type.length === 0) {
@@ -162,7 +167,7 @@ export class Session {
     return stored;
   }
 
-  /** Convenience wrappers for the common event kinds. */
+  /** 常用事件类型的便捷封装。 */
   appendUserMessage(content: string): UserMessageEvent {
     return this.append({ type: "message.user", content }) as UserMessageEvent;
   }
@@ -187,7 +192,7 @@ export class Session {
     return this.append({ type: "tool.result", tool }) as ToolResultEvent;
   }
 
-  /** All events, in append order. */
+  /** 全部事件，按追加顺序。 */
   get log(): readonly AnySessionEvent[] {
     return this.events;
   }
@@ -196,27 +201,27 @@ export class Session {
     return this.events.length;
   }
 
-  /** The JSONL representation of everything logged so far. */
+  /** 当前全部日志的 JSONL 文本表示。 */
   toJSONL(): string {
     return this.events.map((e) => JSON.stringify(e)).join("\n") + (this.events.length ? "\n" : "");
   }
 
-  /** Wait for pending file writes to land. */
+  /** 等待尚未落盘的文件写入完成。 */
   async flush(): Promise<void> {
     await this.writeChain;
   }
 
   /**
-   * Fold the log into the message list sent to the LLM.
+   * 把日志折叠成发给 LLM 的消息列表。
    *
-   * Rules:
-   *   - `message.user` / `message.system` become user/system messages;
-   *   - `message.assistant` becomes an assistant message (tool calls kept);
-   *   - `tool.result` becomes a `tool` message referencing its call id;
-   *   - every other event type is ignored.
+   * 投影规则：
+   *   - `message.user` / `message.system` -> user / system 消息；
+   *   - `message.assistant` -> assistant 消息（保留 toolCalls）；
+   *   - `tool.result` -> 引用对应调用 id 的 `tool` 消息；
+   *   - 其余事件类型一律忽略。
    *
-   * With `{ hoistSystem: true }` every system message is merged into one
-   * leading message (see `hoistSystemPrompt`).
+   * 传入 `{ hoistSystem: true }` 时，所有 system 消息会被合并成一条并置顶
+   * （见 `hoistSystemPrompt`）。
    */
   deriveMessages(options: DeriveOptions = {}): Message[] {
     const messages = this.events.reduce<Message[]>((acc, event) => {
@@ -228,16 +233,16 @@ export class Session {
   }
 
   /**
-   * Fold the log with system messages merged into a single leading message.
-   * Convenience equivalent of `deriveMessages({ hoistSystem: true })`.
+   * 折叠日志，并把 system 消息合并为唯一一条置顶消息。
+   * 等价于 `deriveMessages({ hoistSystem: true })` 的便捷写法。
    */
   deriveApiMessages(): Message[] {
     return this.deriveMessages({ hoistSystem: true });
   }
 
-  // --- Persistence --------------------------------------------------------
+  // --- 持久化 -------------------------------------------------------------
 
-  /** Write the whole log to `file`, replacing its contents. */
+  /** 把完整日志写入 `file`，覆盖原内容。 */
   async persist(file = this.file): Promise<string> {
     if (!file) {
       throw new Error("persist() requires a target file path");
@@ -248,16 +253,16 @@ export class Session {
   }
 
   /**
-   * Rebuild a session from a JSONL file. Events already on disk are kept
-   * verbatim (their seq/ts are not re-stamped) and the sequence counter
-   * continues after the highest existing `seq`.
+   * 从 JSONL 文件重建会话。
+   * 磁盘上已有的事件原样保留（不重新盖 seq/ts），
+   * 序号计数器从现有最大 `seq` 之后继续。
    */
   static async load(file: string, options: Omit<SessionOptions, "file"> = {}): Promise<Session> {
     const content = await readFile(file, "utf8");
     const rawEvents = parseJsonl(content, { strict: options.strict, file });
 
-    // The log is the source of truth: recover identity from `session.created`
-    // rather than minting a fresh id on every load. Explicit options win.
+    // 日志是唯一真源：身份信息从 `session.created` 事件恢复，
+    // 而不是每次加载都生成新 id。显式传入的 options 优先级更高。
     const meta = readSessionMeta(rawEvents);
     const session = new Session({
       ...options,
@@ -270,7 +275,7 @@ export class Session {
     return session;
   }
 
-  /** Restore from an array of raw events (already-parsed JSONL records). */
+  /** 从已解析的事件数组恢复（JSONL 记录的原样形式）。 */
   restore(rawEvents: unknown[]): void {
     let maxSeq = -1;
     for (const raw of rawEvents) {
@@ -284,7 +289,7 @@ export class Session {
   }
 }
 
-// --- Projection -----------------------------------------------------------
+// --- 投影（fold） ---------------------------------------------------------
 
 function projectEvent(event: AnySessionEvent): Message | undefined {
   switch (event.type) {
@@ -315,12 +320,12 @@ function projectEvent(event: AnySessionEvent): Message | undefined {
     }
 
     default:
-      // session.created, llm.provider-changed, custom events: not messages.
+      // session.created、llm.provider-changed、自定义事件：都不是消息。
       return undefined;
   }
 }
 
-/** Turn a `GenerateResult` into message event payloads. */
+/** 把 `GenerateResult` 转换成消息事件的载荷列表。 */
 export function assistantEventsFrom(result: {
   text: string;
   toolCalls: ToolCall[];
@@ -331,7 +336,7 @@ export function assistantEventsFrom(result: {
     finishReason: result.toolCalls.length ? "tool_calls" : "stop",
     provider: "session",
   });
-  // Skip empty assistant turns entirely: they add noise to the log.
+  // 完全跳过空的 assistant 轮次：它们只会给日志增加噪音。
   if (!message.content && !message.toolCalls) return [];
   return [
     {
@@ -342,9 +347,9 @@ export function assistantEventsFrom(result: {
   ];
 }
 
-// --- Helpers --------------------------------------------------------------
+// --- 辅助函数 -------------------------------------------------------------
 
-/** Recover session identity from the first `session.created` event. */
+/** 从首个 `session.created` 事件中恢复会话身份信息。 */
 function readSessionMeta(rawEvents: unknown[]): {
   id?: string;
   title?: string;
@@ -395,8 +400,8 @@ function parseJsonl(
           err,
         );
       }
-      // Non-strict: a torn final line (crash mid-write) is skipped rather
-      // than fatal, so the rest of the durable log stays recoverable.
+      // 非严格模式：末行被截断（写入过程中崩溃）时跳过而不报错，
+      // 使持久日志的其余部分仍可恢复。
       continue;
     }
   }
@@ -404,11 +409,10 @@ function parseJsonl(
 }
 
 /**
- * Merge all system messages into one leading message.
+ * 把所有 system 消息合并成一条置顶消息。
  *
- * Provider APIs generally accept a single system prompt, placed first. This
- * preserves every system message's text (joined with a blank line) instead of
- * dropping later ones, which would silently lose instructions.
+ * 厂商 API 通常只接受一条 system prompt 且需置于首位。这里把每条 system
+ * 消息的正文（用空行连接）全部保留，而不是丢弃后面那些——否则会静默丢失指令。
  */
 export function hoistSystemPrompt(messages: Message[]): Message[] {
   const systemParts: string[] = [];

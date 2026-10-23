@@ -1,21 +1,20 @@
 /**
- * Event bus with five dispatch semantics.
+ * 事件总线，提供五种派发语义。
  *
- * Listeners are stored per event in registration order. The bus is purely
- * in-memory: callers are responsible for calling `off` (or `clear()`) when
- * they no longer need a subscription.
+ * 监听器按事件分组、按注册顺序存放。总线是纯内存结构：
+ * 不再需要订阅时由调用方负责 `off` 或 `clear()`。
  */
 
-/** Generic listener; each dispatch mode narrows this to its own shape. */
+/** 通用监听器；各派发模式会给出更精确的签名。 */
 export type Listener = (...args: any[]) => any;
 
-/** Listener used by `waterfall`: receives the current value and a `next`. */
+/** `waterfall` 使用的监听器：接收当前值与 `next` 回调。 */
 export type WaterfallListener<T> = (
   value: T,
   next: (newValue: T) => void,
 ) => T | void | Promise<T | void>;
 
-/** Thrown when a `waterfall` listener neither calls `next` nor completes. */
+/** 当 waterfall 链路中的监听器既没调用 next 也没返回时抛出。 */
 export class WaterfallStalledError extends Error {
   constructor(
     public readonly event: string,
@@ -33,9 +32,9 @@ export class EventBus {
   private disposed = false;
 
   /**
-   * Subscribe a listener. Registering the same function twice creates two
-   * independent subscriptions; each matching `off` call removes one.
-   * Returns an unsubscribe function for convenience.
+   * 订阅监听器。同一个函数注册两次会产生两个独立订阅，
+   * 每次 `off` 只移除一个。
+   * 返回值是一个便捷的取消订阅函数。
    */
   on(event: string, listener: Listener): () => void {
     this.assertAlive();
@@ -49,8 +48,8 @@ export class EventBus {
   }
 
   /**
-   * Remove one matching subscription. A no-op when the listener is not
-   * registered for that event.
+   * 移除一个匹配的订阅。
+   * 若该监听器未在此事件上注册，则静默无操作。
    */
   off(event: string, listener: Listener): void {
     const list = this.listeners.get(event);
@@ -63,17 +62,17 @@ export class EventBus {
     }
   }
 
-  /** Number of listeners registered for an event. */
+  /** 某事件当前的监听器数量。 */
   listenerCount(event: string): number {
     return this.listeners.get(event)?.length ?? 0;
   }
 
-  /** Whether anything listens to an event. */
+  /** 某事件是否有监听器。 */
   has(event: string): boolean {
     return this.listenerCount(event) > 0;
   }
 
-  /** Drop every subscription for one event (or all events when omitted). */
+  /** 清空某个事件的订阅（省略参数则清空全部）。 */
   clear(event?: string): void {
     if (event === undefined) {
       this.listeners.clear();
@@ -83,30 +82,29 @@ export class EventBus {
   }
 
   /**
-   * Synchronous notification. Return values and rejections are deliberately
-   * ignored — `emit` is fire-and-forget.
+   * 同步通知。返回值与异常都被刻意忽略——`emit` 是「发出即忘」语义。
    */
   emit(event: string, ...args: unknown[]): void {
     for (const listener of this.snapshot(event)) {
       try {
         const result = listener(...args);
-        // A listener that returns a promise could reject later; swallow it so
-        // fire-and-forget dispatch never produces unhandled rejections.
+        // 若监听器返回 Promise，其后续 rejection 会被吞掉，
+        // 以免「发出即忘」的派发产生 unhandled rejection。
         if (result && typeof result.then === "function") {
           void result.then(undefined, () => {});
         }
       } catch {
-        // emit does not propagate listener errors.
+        // emit 不向外传播监听器异常。
       }
     }
   }
 
-  /** Run every listener concurrently and wait for all of them. */
+  /** 并行执行所有监听器并等待全部完成。 */
   async parallel(event: string, ...args: unknown[]): Promise<unknown[]> {
     return Promise.all(this.snapshot(event).map((l) => l(...args)));
   }
 
-  /** Run listeners one at a time, in registration order. */
+  /** 按注册顺序逐个 await 执行。 */
   async serial(event: string, ...args: unknown[]): Promise<unknown[]> {
     const results: unknown[] = [];
     for (const listener of this.snapshot(event)) {
@@ -116,31 +114,27 @@ export class EventBus {
   }
 
   /**
-   * Middleware-style dispatch.
+   * 中间件式派发。
    *
-   * Each listener receives `(value, next)`. It may:
-   *   - call `next(newValue)` to hand a new value to the following listener;
-   *   - `return` a value to short-circuit and resolve with that value;
-   *   - `return void` *after* awaiting its own async work and calling `next`
-   *     to continue the chain.
+   * 每个监听器收到 `(value, next)`，可以：
+   *   - 调用 `next(newValue)` 把新值交给下一个监听器；
+   *   - `return` 一个值来短路，并以该值结束；
+   *   - 完成自身异步工作并调用 `next` 后返回 `void` 以继续链路。
    *
-   * A listener that returns `void` without ever calling `next` is treated as
-   * stalled and rejects with WaterfallStalledError rather than silently
-   * dropping the remaining listeners.
+   * 若某个监听器返回 `void` 却从未调用 `next`，视为「卡住」，
+   * 抛出 WaterfallStalledError，而不是静默吞掉后续监听器（fail-closed）。
    *
-   * When the chain runs out, the last value is returned.
+   * 链路走完后返回最后一个值。
    */
   async waterfall<T>(event: string, initialValue: T): Promise<T> {
     const chain = this.snapshot(event) as WaterfallListener<T>[];
     let index = 0;
 
     /**
-     * Drive the chain from position `index` with `value`. Each call invokes
-     * exactly one listener and interprets its outcome:
-     *   - `next(v)` was called  -> continue with the next listener and `v`
-     *   - returns a value       -> short-circuit, resolve with it
-     *   - returns undefined,
-     *     never called next     -> stalled: reject
+     * 从位置 `index` 开始、以 `value` 驱动链路。每次调用恰好执行一个监听器：
+     *   - 调用了 next(v)        -> 带着 v 继续下一个监听器
+     *   - 返回了值              -> 短路，以该值结束
+     *   - 返回 undefined 且没 next -> 卡住，抛错
      */
     const run = async (value: T): Promise<T> => {
       while (index < chain.length) {
@@ -158,15 +152,14 @@ export class EventBus {
         const result = await listener(value, next);
 
         if (result !== undefined) {
-          return result as T; // short-circuit
+          return result as T; // 短路
         }
         if (nextCalled) {
           value = nextValue;
           continue;
         }
         if (index >= chain.length) {
-          // Last listener finished without calling next: the chain simply
-          // ends, keeping the current value.
+          // 最后一个监听器未调用 next 就结束了：链路自然收尾，保留当前值。
           return value;
         }
         throw new WaterfallStalledError(event, position);
@@ -178,9 +171,8 @@ export class EventBus {
   }
 
   /**
-   * Run listeners in order and stop at the first one that returns something
-   * other than `undefined`. Resolves to that value, or `undefined` when every
-   * listener returned `undefined`.
+   * 按顺序执行监听器，遇到第一个返回「非 undefined」的监听器即停止。
+   * 都返回 undefined 时解析为 undefined。
    */
   async bail<T = unknown>(event: string, ...args: unknown[]): Promise<T | undefined> {
     for (const listener of this.snapshot(event)) {
@@ -192,7 +184,7 @@ export class EventBus {
     return undefined;
   }
 
-  /** Mark the bus disposed; any further subscription throws. */
+  /** 标记总线已销毁；此后任何订阅都会抛错。 */
   dispose(): void {
     this.disposed = true;
     this.listeners.clear();
@@ -202,7 +194,7 @@ export class EventBus {
     return this.disposed;
   }
 
-  /** Copy the list so listeners may (un)subscribe during dispatch safely. */
+  /** 复制监听器列表，使监听器在派发过程中增删订阅也安全。 */
   private snapshot(event: string): Listener[] {
     return [...(this.listeners.get(event) ?? [])];
   }

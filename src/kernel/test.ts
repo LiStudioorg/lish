@@ -1,6 +1,6 @@
 /**
- * Kernel smoke tests: dependency injection + LIFO disposal + plugin loading.
- * Run with: npm run test:kernel
+ * 内核冒烟测试：依赖注入 + LIFO 销毁 + 插件加载。
+ * 运行方式：npm run test:kernel
  */
 
 import assert from "node:assert/strict";
@@ -11,7 +11,7 @@ const tests: Array<[string, () => Promise<void> | void]> = [];
 const test = (name: string, fn: () => Promise<void> | void) =>
   tests.push([name, fn]);
 
-// --- Context: provide / resolve -------------------------------------------
+// --- Context：provide / resolve --------
 
 test("provide + resolve returns the same instance", () => {
   const ctx = new Context();
@@ -45,7 +45,7 @@ test("provide returns the registered service", () => {
   assert.equal(ctx.provide("svc", svc), svc);
 });
 
-// --- Context: LIFO disposal -----------------------------------------------
+// --- Context：LIFO 销毁 --------
 
 test("dispose runs disposers in reverse (LIFO) order", async () => {
   const ctx = new Context();
@@ -122,7 +122,7 @@ test("provide / effect after dispose throw", async () => {
   assert.throws(() => ctx.effect(() => {}), /already been disposed/);
 });
 
-// --- Plugin loading -------------------------------------------------------
+// --- 插件加载 --------
 
 test("loadPlugin applies a plugin with satisfied dependencies", async () => {
   const ctx = new Context();
@@ -206,7 +206,7 @@ test("dependency order is enforced across a plugin list", async () => {
   );
 });
 
-// --- Runner ---------------------------------------------------------------
+// --- 测试运行器 --------
 
 async function main(): Promise<void> {
   let passed = 0;

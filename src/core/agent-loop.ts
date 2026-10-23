@@ -1,13 +1,11 @@
 /**
- * Agent loop: drives the model -> tool -> model cycle until the model stops
- * asking for tools.
+ * Agent 循环：驱动「模型 -> 工具 -> 模型」的往复，直到模型不再请求工具。
  *
- * Every step is written to the session log, so the transcript is a faithful,
- * replayable record of what the agent did. The loop is bounded three ways:
- *   - `maxSteps` caps model turns per run;
- *   - `maxToolCalls` caps tool executions per run;
- *   - a repeated-identical-call detector catches A->B->A->B oscillation that a
- *     plain step counter would only stop after burning the whole budget.
+ * 每一步都会写入会话日志，因此日志就是一份忠实、可回放的行为记录。
+ * 循环有三重保护：
+ *   - `maxSteps`：单次 run 内允许的模型轮次上限；
+ *   - `maxToolCalls`：单次 run 内允许的工具执行次数上限；
+ *   - 重复调用检测：识别 A->B->A->B 式震荡，纯计步器只会在耗尽预算后才停。
  */
 
 import type { Context } from "../kernel/context.js";
@@ -26,18 +24,17 @@ export const AGENT_COMPLETE = "agent:complete";
 export const AGENT_ABORTED = "agent:aborted";
 
 export interface AgentLoopOptions {
-  /** Maximum model turns in one `run`. Defaults to 8. */
+  /** 单次 `run` 允许的最大模型轮次，默认 8。 */
   maxSteps?: number;
-  /** Maximum tool executions in one `run`. Defaults to 24. */
+  /** 单次 `run` 允许的最大工具执行次数，默认 24。 */
   maxToolCalls?: number;
   /**
-   * Abort when the same (name + arguments) tool call is requested more than
-   * this many times in one run. Defaults to 3.
+   * 同一「工具名 + 参数」在单次 run 中被请求超过该次数时中断，默认 3。
    */
   maxRepeatedCalls?: number;
-  /** Options forwarded to every model call. */
+  /** 透传给每次模型调用的参数。 */
   generateOptions?: GenerateOptions;
-  /** Fold the session into API-shaped messages (single leading system). */
+  /** 是否把会话折叠成 API 规范形状（唯一一条置顶 system）。 */
   hoistSystem?: boolean;
 }
 
@@ -60,7 +57,7 @@ export interface AgentRunResult {
   sessionId: string;
   stopReason: AgentStopReason;
   steps: AgentStepRecord[];
-  /** Final assistant text (the last text the model produced). */
+  /** 最终 assistant 文本（模型最后一次产出的文本）。 */
   text: string;
   toolCallsExecuted: number;
   error?: string;
@@ -93,7 +90,7 @@ export class AgentLoop {
     };
   }
 
-  /** Lazily resolve dependencies so the plugin can be mounted before them. */
+  /** 惰性解析依赖，以便本插件可以先于依赖被挂载。 */
   private get llm(): LlmRuntime {
     if (!this.ctx.has(LlmRuntime.KEY)) {
       throw new AgentLoopError(`AgentLoop requires the "${LlmRuntime.KEY}" service`);
@@ -109,10 +106,10 @@ export class AgentLoop {
   }
 
   /**
-   * Run one user turn to completion.
+   * 完整跑完一轮用户输入。
    *
-   * Writes: user message, assistant messages (with tool calls), tool results,
-   * and an `agent:complete` event carrying the stop reason.
+   * 会写入：user 消息、assistant 消息（含工具调用）、工具结果，
+   * 以及一条携带结束原因的 `agent:complete` 事件。
    */
   async run(session: Session, userMessage: string | Message): Promise<AgentRunResult> {
     const user =
@@ -120,7 +117,7 @@ export class AgentLoop {
         ? userMessage
         : (userMessage.content ?? "");
 
-    // 1. Log the user turn first: the log leads, the model follows.
+    // 1. 先记录用户输入：日志先行，模型随后。
     session.appendUserMessage(user);
 
     const steps: AgentStepRecord[] = [];
@@ -129,7 +126,7 @@ export class AgentLoop {
     let text = "";
     let error: string | undefined;
 
-    // Oscillation guard: how often each distinct call has been seen.
+    // 震荡保护：统计每个不同调用已出现的次数。
     const seenCalls = new Map<string, number>();
 
     try {
@@ -143,7 +140,7 @@ export class AgentLoop {
           ...this.options.generateOptions,
         });
 
-        // 2. Record the assistant turn verbatim.
+        // 2. 原样记录 assistant 本轮输出。
         const assistant = assistantMessageFrom(result);
         session.appendAssistantMessage(assistant.content, assistant.toolCalls ?? []);
 
@@ -157,13 +154,13 @@ export class AgentLoop {
 
         if (result.text) text = result.text;
 
-        // 3. No tool calls => the turn is done.
+        // 3. 没有工具调用 => 本轮结束。
         if (result.toolCalls.length === 0) {
           stopReason = result.finishReason === "length" ? "length" : "stop";
           break;
         }
 
-        // 4. Loop protection before executing anything.
+        // 4. 执行任何工具之前先做循环保护判断。
         let repeated = false;
         for (const call of result.toolCalls) {
           const key = `${call.name}:${stableStringify(call.arguments)}`;
@@ -183,7 +180,7 @@ export class AgentLoop {
           break;
         }
 
-        // 5. Execute each call and log its result.
+        // 5. 逐个执行调用并记录结果。
         for (const call of result.toolCalls) {
           toolCallsExecuted++;
           let content: string;
@@ -198,8 +195,8 @@ export class AgentLoop {
             content = outcome.content;
             isError = outcome.isError;
           } catch (err) {
-            // Unknown / blocked tools are surfaced to the model, not fatal:
-            // it may recover by choosing a different tool.
+            // 未知工具/被阻断的调用作为错误结果反馈给模型，而非致命错误：
+            // 模型有机会改选其它工具自救。
             if (err instanceof ToolNotFoundError || err instanceof ToolBlockedError) {
               content = err.message;
               isError = true;
@@ -217,7 +214,7 @@ export class AgentLoop {
         }
 
         if (step === this.options.maxSteps - 1) {
-          // We used the last allowed turn and the model still wants tools.
+          // 已用尽最后一个允许的轮次，而模型仍想调用工具。
           stopReason = "max_steps";
           error = `Reached max steps (${this.options.maxSteps})`;
         }
@@ -252,7 +249,7 @@ export class AgentLoop {
   }
 }
 
-/** Deterministic JSON with sorted keys, for the repeat detector. */
+/** 键名排序的确定性 JSON 序列化，供重复调用检测使用。 */
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;

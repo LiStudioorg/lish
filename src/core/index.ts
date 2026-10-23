@@ -1,12 +1,11 @@
 /**
- * Mount the M1 core services onto a Context.
+ * 把 M1 的核心服务挂载到 Context 上。
  *
- * One plugin, three services, in dependency order:
- *   ctx.sessions  -> ctx.llm -> ctx.tools -> ctx.agent
+ * 一个插件、四个服务，按依赖顺序注册：
+ *   ctx.sessions -> ctx.llm -> ctx.tools -> ctx.agent
  *
- * Each is registered before the next one that may inject it, and all are torn
- * down with the kernel (the Context disposes the EventBus last, so tools can
- * still observe events during teardown).
+ * 每个服务都先于「可能注入它」的下一个服务注册；全部随内核一起销毁。
+ * Context 最后才销毁 EventBus，因此拆除阶段工具仍能观察到事件。
  */
 
 import type { Context } from "../kernel/context.js";
@@ -22,7 +21,7 @@ export interface CorePluginOptions {
   agent?: AgentLoopOptions;
 }
 
-/** Mount sessions + llm + tools + agent. Idempotent per key. */
+/** 挂载 sessions + llm + tools + agent；按 key 幂等。 */
 export function mountCore(ctx: Context, options: CorePluginOptions = {}): void {
   const provide = <T>(key: string, value: T): T => {
     if (ctx.has(key)) return ctx.resolve<T>(key);
@@ -35,7 +34,7 @@ export function mountCore(ctx: Context, options: CorePluginOptions = {}): void {
   provide(AgentLoop.KEY, new AgentLoop(ctx, options.agent ?? {}));
 }
 
-/** The core plugin, for use with `loadPlugin`. */
+/** 核心插件，可直接交给 `loadPlugin` 使用。 */
 export function corePlugin(options: CorePluginOptions = {}): Plugin {
   return {
     name: "core",

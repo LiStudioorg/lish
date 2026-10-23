@@ -1,9 +1,9 @@
 /**
- * M1 end-to-end tests: tool pipeline + agent loop.
+ * M1 端到端测试：工具管线 + Agent 循环。
  *
- * The headline case drives a full model -> tool -> model cycle through the
- * MockProvider and asserts the session log recorded every step.
- * Run with: npm run test:agent
+ * 主用例通过 MockProvider 跑完一整圈「模型 -> 工具 -> 模型」，
+ * 并断言会话日志完整记录了每一步。
+ * 运行方式：npm run test:agent
  */
 
 import assert from "node:assert/strict";
@@ -46,7 +46,7 @@ const test = (name: string, fn: () => Promise<void> | void) =>
 
 const tmp = () => mkdtemp(join(tmpdir(), "lish-m1b-"));
 
-/** Build a context with the full core stack and an echo tool. */
+/** 构造一个完整核心栈的上下文，并注册 echo 工具。 */
 function makeStack(options: { provider?: LlmProvider; agent?: CorePluginOptions["agent"] } = {}) {
   const ctx = new Context();
   mountCore(ctx, { llm: { provider: options.provider ?? new MockProvider() }, agent: options.agent });
@@ -60,7 +60,7 @@ function makeStack(options: { provider?: LlmProvider; agent?: CorePluginOptions[
   return { ctx, tools, sessions: ctx.resolve<SessionService>("sessions"), llm: ctx.resolve<LlmRuntime>("llm") };
 }
 
-// --- System prompt hoisting ----------------------------------------------
+// --- System prompt 置顶合并 --------
 
 test("hoistSystemPrompt merges system messages into one leading message", () => {
   const input: Message[] = [
@@ -131,7 +131,7 @@ test("every system prompt survives hoisting (none silently dropped)", () => {
   assert.equal(out[0]?.content, "one\n\ntwo\n\nthree");
 });
 
-// --- Strict JSONL mode ---------------------------------------------------
+// --- 严格 JSONL 模式 --------
 
 async function writeTornLog(file: string) {
   const { appendFile } = await import("node:fs/promises");
@@ -197,7 +197,7 @@ test("a valid log loads identically in strict mode", async () => {
   assert.equal(strictLoaded.id, "good");
 });
 
-// --- Session service -----------------------------------------------------
+// --- 会话服务 --------
 
 test("SessionService registers as ctx.sessions and tracks sessions", async () => {
   const { ctx, sessions } = makeStack();
@@ -238,7 +238,7 @@ test("SessionService can write JSONL into a directory", async () => {
   await ctx.dispose();
 });
 
-// --- Core plugin mounting -------------------------------------------------
+// --- 核心插件挂载 --------
 
 test("mountCore provides all four services", async () => {
   const { ctx } = makeStack();
@@ -265,7 +265,7 @@ test("core plugin mounts via loadPlugin", async () => {
   await ctx.dispose();
 });
 
-// --- ToolRegistry ---------------------------------------------------------
+// --- 工具注册表 --------
 
 test("register + executeTool runs the handler", async () => {
   const { ctx, tools } = makeStack();
@@ -376,7 +376,7 @@ test("registry without a Context still works (no pipeline)", async () => {
   assert.equal(result.content, "5");
 });
 
-// --- Agent loop: the headline end-to-end case ----------------------------
+// --- Agent 循环：端到端主用例 --------
 
 test("agent loop completes model -> tool -> model and logs every step", async () => {
   const dir = await tmp();
@@ -386,7 +386,7 @@ test("agent loop completes model -> tool -> model and logs every step", async ()
 
   const result = await agent.run(session, "please echo");
 
-  // Loop outcome
+  // 循环结果
   assert.equal(result.stopReason, "stop");
   assert.equal(result.toolCallsExecuted, 1);
   assert.equal(result.steps.length, 2);
@@ -394,7 +394,7 @@ test("agent loop completes model -> tool -> model and logs every step", async ()
   assert.equal(result.steps[1]?.finishReason, "stop");
   assert.match(result.text, /Summary of tool results/);
 
-  // The conversation the model saw
+  // 模型实际看到的对话
   const messages = session.deriveMessages();
   assert.deepEqual(
     messages.map((m) => m.role),
@@ -405,7 +405,7 @@ test("agent loop completes model -> tool -> model and logs every step", async ()
   assert.equal(messages[2]?.tool?.content, "hello from mock");
   assert.match(messages[3]?.content ?? "", /echo: hello from mock/);
 
-  // The log recorded the whole lifecycle
+  // 日志记录了完整生命周期
   const types = session.log.map((e) => e.type);
   assert.deepEqual(types, [
     "session.created",
@@ -419,7 +419,7 @@ test("agent loop completes model -> tool -> model and logs every step", async ()
   assert.equal(completed.stopReason, "stop");
   assert.equal(completed.toolCallsExecuted, 1);
 
-  // seq is contiguous and the file mirrors the log
+  // seq 连续，且磁盘文件与内存日志一致
   assert.deepEqual(
     session.log.map((e) => e.seq),
     Array.from({ length: session.log.length }, (_, i) => i),
@@ -502,7 +502,7 @@ test("agent loop surfaces an unknown tool to the model as an error result", asyn
   await ctx.dispose();
 });
 
-// --- Agent loop: loop protection -----------------------------------------
+// --- Agent 循环：循环保护 --------
 
 test("maxSteps halts a provider that always asks for tools", async () => {
   let n = 0;
@@ -645,7 +645,7 @@ test("agent loop refuses to run without a provider", async () => {
   await ctx.dispose();
 });
 
-// --- Agent loop: interception during execution ---------------------------
+// --- Agent 循环：执行期拦截 --------
 
 test("a blocking pre-execute hook is reported to the model, run continues", async () => {
   const { ctx, sessions } = makeStack();
@@ -699,7 +699,7 @@ test("agent loop sends hoisted system messages to the provider", async () => {
   await ctx.dispose();
 });
 
-// --- Runner ---------------------------------------------------------------
+// --- 测试运行器 --------
 
 async function main(): Promise<void> {
   let passed = 0;

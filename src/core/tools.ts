@@ -1,20 +1,20 @@
 /**
- * Tool registry with an interception pipeline.
+ * 工具注册表与拦截管线。
  *
- * Tools are plain async functions plus a JSON-schema-ish description. Before a
- * tool runs, `tools/pre-execute` fires as a waterfall so plugins can inspect
- * or rewrite the arguments — or throw to block the call outright. After it
- * runs, `tools/post-execute` fires so results can be post-processed.
+ * 工具本质上是「一个异步函数 + 一段 JSON Schema 描述」。执行前后各有一个钩子：
+ *   - 执行前触发 `tools/pre-execute`（waterfall 语义），插件可检查、改写参数，
+ *     或直接抛错阻断本次调用；
+ *   - 执行后触发 `tools/post-execute`，可对结果做后处理。
  */
 
 import type { Context } from "../kernel/context.js";
 import type { ToolSchema, ToolCall } from "./llm.js";
 
-/** Event names used by the pipeline. */
+/** 管线使用的事件名。 */
 export const TOOLS_PRE_EXECUTE = "tools/pre-execute";
 export const TOOLS_POST_EXECUTE = "tools/post-execute";
 
-/** A tool implementation. `args` is whatever the model produced. */
+/** 工具实现。`args` 是模型给出的参数对象。 */
 export type ToolHandler = (
   args: Record<string, unknown>,
 ) => unknown | Promise<unknown>;
@@ -22,24 +22,24 @@ export type ToolHandler = (
 export interface ToolDefinition {
   name: string;
   description?: string;
-  /** JSON Schema for the arguments object, surfaced to the model. */
+  /** 参数对象的 JSON Schema，会展示给模型。 */
   parameters?: Record<string, unknown>;
   handler: ToolHandler;
 }
 
-/** Payload flowing through `tools/pre-execute`. */
+/** 流经 `tools/pre-execute` 的载荷。 */
 export interface PreExecutePayload {
   name: string;
   args: Record<string, unknown>;
   callId?: string;
 }
 
-/** Payload flowing through `tools/post-execute`. */
+/** 流经 `tools/post-execute` 的载荷。 */
 export interface PostExecutePayload {
   name: string;
   args: Record<string, unknown>;
   result: unknown;
-  /** Serialised result, as it will be shown to the model. */
+  /** 序列化后的结果，即最终展示给模型的内容。 */
   content: string;
   isError: boolean;
   durationMs: number;
@@ -75,12 +75,12 @@ export class ToolRegistry {
   private readonly tools = new Map<string, ToolDefinition>();
   private readonly ctx?: Context;
 
-  /** Passing the context enables the pre/post interception pipeline. */
+  /** 传入 Context 才会启用前后拦截管线；不传则退化为裸注册表。 */
   constructor(ctx?: Context) {
     this.ctx = ctx;
   }
 
-  /** Register (or replace) a tool. Returns the registry for chaining. */
+  /** 注册（或替换）一个工具，返回自身以支持链式调用。 */
   register(tool: ToolDefinition): this {
     if (!tool.name) throw new Error("Tool requires a name");
     if (typeof tool.handler !== "function") {
@@ -90,7 +90,7 @@ export class ToolRegistry {
     return this;
   }
 
-  /** Remove a tool; returns whether something was removed. */
+  /** 移除一个工具，返回是否确有移除。 */
   unregister(name: string): boolean {
     return this.tools.delete(name);
   }
@@ -107,12 +107,12 @@ export class ToolRegistry {
     return this.tools.size;
   }
 
-  /** Names of all registered tools, in registration order. */
+  /** 全部已注册工具的名称，按注册顺序。 */
   list(): string[] {
     return [...this.tools.keys()];
   }
 
-  /** Schemas for the model's `tools` option. */
+  /** 生成供模型 `tools` 参数使用的 schema 列表。 */
   schemas(): ToolSchema[] {
     return [...this.tools.values()].map((t) => ({
       name: t.name,
@@ -122,18 +122,19 @@ export class ToolRegistry {
   }
 
   /**
-   * Execute a tool by name.
+   * 按名称执行工具。
    *
-   * Order of operations:
-   *   1. resolve the definition (throws ToolNotFoundError);
-   *   2. `tools/pre-execute` waterfall — may rewrite args or block;
-   *   3. run the handler;
-   *   4. `tools/post-execute` waterfall — may reshape the content.
+   * 执行顺序：
+   *   1. 查找工具定义（找不到抛 ToolNotFoundError）；
+   *   2. `tools/pre-execute` waterfall —— 可改写参数或阻断；
+   *   3. 执行 handler；
+   *   4. `tools/post-execute` waterfall —— 可重塑返回内容。
    *
-   * Handler failures are captured and returned as `isError: true` rather than
-   * thrown, because a failed tool is data the model needs to see. Blocking via
-   * the pre-execute hook *is* thrown to the caller: that is a policy decision,
-   * not a tool outcome.
+   * 语义区分（重要）：
+   *   - handler 抛出的异常会被捕获并返回 `isError: true`，因为「工具失败」
+   *     本身就是模型需要看到的数据，不应中断整个循环；
+   *   - 被 pre-execute 钩子阻断则**向外抛出**，因为那是策略决定，
+   *     而不是工具的执行结果。
    */
   async executeTool(
     name: string,
@@ -146,8 +147,8 @@ export class ToolRegistry {
     let payload: PreExecutePayload = { name, args: { ...args }, ...(callId ? { callId } : {}) };
 
     if (this.ctx) {
-      // A waterfall returns what the chain resolves to; the last listener that
-      // calls next() contributes the final payload.
+      // waterfall 返回链路解析出的值；最后一个调用 next() 的监听器
+      // 决定最终载荷。
       const intercepted = await this.ctx.waterfall<PreExecutePayload>(
         TOOLS_PRE_EXECUTE,
         payload,
@@ -198,7 +199,7 @@ export class ToolRegistry {
     };
   }
 
-  /** Execute a batch of model tool calls, preserving order. */
+  /** 批量执行模型给出的工具调用，保持原有顺序。 */
   async executeCalls(calls: ToolCall[]): Promise<ExecuteToolResult[]> {
     const out: ExecuteToolResult[] = [];
     for (const call of calls) {
@@ -219,13 +220,13 @@ export class ToolRegistry {
     return out;
   }
 
-  /** Drop every tool (used on teardown). */
+  /** 清空所有工具（用于拆除阶段）。 */
   clear(): void {
     this.tools.clear();
   }
 }
 
-/** Render a tool result as the string the model will read. */
+/** 把工具结果渲染成模型将要阅读的字符串。 */
 export function serialise(value: unknown): string {
   if (typeof value === "string") return value;
   if (value === undefined) return "";

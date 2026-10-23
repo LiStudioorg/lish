@@ -1,7 +1,7 @@
 /**
- * M1 tests: session event log (append-only JSONL + fold) and the LLM seam
- * (MockProvider, LlmRuntime, hot provider switching).
- * Run with: npm run test:core
+ * M1 测试：会话事件日志（只追加 JSONL + 折叠投影）与 LLM 接缝
+ * （MockProvider、LlmRuntime、Provider 热切换）。
+ * 运行方式：npm run test:core
  */
 
 import assert from "node:assert/strict";
@@ -30,7 +30,7 @@ const test = (name: string, fn: () => Promise<void> | void) =>
 
 const tmp = () => mkdtemp(join(tmpdir(), "lish-m1-"));
 
-// --- Session: append-only log --------------------------------------------
+// --- Session：只追加日志 --------
 
 test("append stamps seq and ts, and keeps insertion order", () => {
   let clock = 1000;
@@ -80,7 +80,7 @@ test("caller-supplied seq/ts are overwritten by the session", () => {
   assert.equal(stored.ts, 7);
 });
 
-// --- Session: deriveMessages ---------------------------------------------
+// --- Session：deriveMessages 投影 --------
 
 test("deriveMessages projects user/assistant/tool events", () => {
   const session = new Session({ id: "s", emitCreated: false });
@@ -143,7 +143,7 @@ test("deriveMessages returns a fresh array each call (no shared state)", () => {
   assert.equal(session.deriveMessages().length, 1);
 });
 
-// --- Session: JSONL persistence ------------------------------------------
+// --- Session：JSONL 持久化 --------
 
 test("toJSONL emits one JSON object per line", () => {
   const session = new Session({ id: "s", emitCreated: false });
@@ -209,7 +209,7 @@ test("Session.load tolerates a torn trailing line", async () => {
   session.appendUserMessage("complete");
   await session.flush();
 
-  // Simulate a crash mid-write: a partial JSON fragment with no newline.
+  // 模拟写入过程中崩溃：一段没有换行符的残缺 JSON 片段。
   const { appendFile } = await import("node:fs/promises");
   await appendFile(file, '{"type":"message.user","content":"part', "utf8");
 
@@ -218,7 +218,7 @@ test("Session.load tolerates a torn trailing line", async () => {
   assert.equal(loaded.deriveMessages()[0]?.content, "complete");
 });
 
-// --- Context: session as a service ---------------------------------------
+// --- Context：把会话作为服务 --------
 
 test("a session can be provided to the kernel", async () => {
   const ctx = new Context();
@@ -232,7 +232,7 @@ test("a session can be provided to the kernel", async () => {
   await ctx.dispose();
 });
 
-// --- MockProvider ---------------------------------------------------------
+// --- MockProvider 模拟 Provider ---
 
 test("MockProvider requests a tool call when there are no tool results", async () => {
   const provider = new MockProvider();
@@ -280,7 +280,7 @@ test("MockProvider honours custom tool configuration", async () => {
   assert.deepEqual(result.toolCalls[0]?.arguments, { path: "/etc/hosts" });
 });
 
-// --- LlmRuntime -----------------------------------------------------------
+// --- LlmRuntime 运行时 ---
 
 test("LlmRuntime mounts as ctx.llm via the plugin loader", async () => {
   const ctx = new Context();
@@ -370,39 +370,46 @@ test("a custom provider can be plugged in without touching the runtime", async (
   await ctx.dispose();
 });
 
-test("ask() tracks history and feeds tool results back to the model", async () => {
+test("ask() is a stateless convenience alias of generate()", async () => {
   const ctx = new Context();
   const llm = new LlmRuntime(ctx, { provider: new MockProvider() });
 
   const first = await llm.ask([{ role: "user", content: "echo please" }]);
   assert.equal(first.finishReason, "tool_calls");
 
-  // Execute the requested tool, record the result, ask again.
+  // 运行时不再累积历史：第二次调用必须由调用方完整给出消息列表。
   const call = first.toolCalls[0]!;
-  const second = await llm.ask([toolResultMessage(call, "echoed!")]);
+  const history: Message[] = [
+    { role: "user", content: "echo please" },
+    assistantMessageFrom(first),
+    toolResultMessage(call, "echoed!"),
+  ];
+  const second = await llm.ask(history);
   assert.equal(second.finishReason, "stop");
   assert.match(second.text, /echo: echoed!/);
 
-  // History: user, assistant(tool_calls), tool, assistant(summary)
-  assert.deepEqual(
-    llm.messages.map((m) => m.role),
-    ["user", "assistant", "tool", "assistant"],
-  );
+  // 两次调用都会被记入结果流水（用于审计），但它不是对话状态。
+  assert.equal(llm.results.length, 2);
 
   await ctx.dispose();
 });
 
-test("resetHistory clears conversation state", async () => {
+test("LlmRuntime no longer accumulates conversation history", async () => {
   const ctx = new Context();
   const llm = new LlmRuntime(ctx, { provider: new MockProvider() });
-  await llm.ask([{ role: "user", content: "hi" }]);
-  assert.ok(llm.messages.length > 0);
-  llm.resetHistory();
-  assert.equal(llm.messages.length, 0);
+
+  await llm.generate([{ role: "user", content: "hi" }]);
+  await llm.generate([{ role: "user", content: "hi again" }]);
+
+  // 旧 API 已移除：不存在 history / messages / resetHistory。
+  assert.equal("messages" in llm, false);
+  assert.equal("resetHistory" in llm, false);
+  assert.equal(llm.results.length, 2);
+
   await ctx.dispose();
 });
 
-// --- End to end: session log drives the model ----------------------------
+// --- 端到端：日志驱动模型 --------
 
 test("end to end: session log folds into a conversation the model completes", async () => {
   const dir = await tmp();
@@ -410,7 +417,7 @@ test("end to end: session log folds into a conversation the model completes", as
   const session = new Session({ id: "e2e", file: join(dir, "e2e.jsonl") });
   const llm = new LlmRuntime(ctx, { provider: new MockProvider() });
 
-  // Turn 1: user message logged, model asks for a tool.
+  // 第 1 轮：记录用户消息，模型请求调用工具。
   session.appendUserMessage("say hi");
   const turn1 = await llm.generate(session.deriveMessages());
   assert.equal(turn1.finishReason, "tool_calls");
@@ -419,14 +426,14 @@ test("end to end: session log folds into a conversation the model completes", as
   const assistantMsg = assistantMessageFrom(turn1);
   session.appendAssistantMessage(assistantMsg.content, assistantMsg.toolCalls);
 
-  // Tool executes, result logged.
+  // 工具执行完毕，结果写入日志。
   session.appendToolResult({
     toolCallId: call.id,
     name: call.name,
     content: String(call.arguments.text ?? ""),
   });
 
-  // Turn 2: the folded log now contains the tool result.
+  // 第 2 轮：折叠后的日志中现已包含工具结果。
   const folded = session.deriveMessages();
   assert.deepEqual(
     folded.map((m) => m.role),
@@ -444,7 +451,7 @@ test("end to end: session log folds into a conversation the model completes", as
   await ctx.dispose();
 });
 
-// --- Runner ---------------------------------------------------------------
+// --- 测试运行器 --------
 
 async function main(): Promise<void> {
   let passed = 0;

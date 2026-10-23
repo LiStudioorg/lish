@@ -1,6 +1,6 @@
 /**
- * EventBus tests: five dispatch modes, listener lifecycle, Context integration.
- * Run with: npm run test:events
+ * EventBus 测试：五种派发语义、监听器生命周期、与 Context 的集成。
+ * 运行方式：npm run test:events
  */
 
 import assert from "node:assert/strict";
@@ -13,7 +13,7 @@ const test = (name: string, fn: () => Promise<void> | void) =>
 
 const tick = (ms = 5) => new Promise((r) => setTimeout(r, ms));
 
-// --- on / off basics ------------------------------------------------------
+// --- 订阅与取消订阅基础 --------
 
 test("on registers and off removes a listener", () => {
   const bus = new EventBus();
@@ -71,7 +71,7 @@ test("empty event maps are cleaned up (no leaked keys)", () => {
   assert.equal(bus.listenerCount("temp"), 0);
 });
 
-// --- emit ----------------------------------------------------------------
+// --- emit 同步派发 --------
 
 test("emit notifies synchronously and in registration order", () => {
   const bus = new EventBus();
@@ -120,7 +120,7 @@ test("emit on an event with no listeners is a no-op", () => {
   assert.doesNotThrow(() => bus.emit("nothing", 1, 2));
 });
 
-// --- parallel ------------------------------------------------------------
+// --- parallel 并行派发 --------
 
 test("parallel runs listeners concurrently", async () => {
   const bus = new EventBus();
@@ -160,7 +160,7 @@ test("parallel rejects if any listener rejects", async () => {
   await assert.rejects(() => bus.parallel("e"), /nope/);
 });
 
-// --- serial --------------------------------------------------------------
+// --- serial 串行派发 --------
 
 test("serial awaits each listener in registration order", async () => {
   const bus = new EventBus();
@@ -199,7 +199,7 @@ test("serial stops at the first rejection", async () => {
   assert.deepEqual(order, ["a"]);
 });
 
-// --- waterfall -----------------------------------------------------------
+// --- waterfall 中间件链路 --------
 
 test("waterfall threads the value through every listener", async () => {
   const bus = new EventBus();
@@ -298,7 +298,7 @@ test("waterfall tolerates a last listener that returns void", async () => {
   assert.equal(await bus.waterfall("e", 1), 2);
 });
 
-// --- bail ----------------------------------------------------------------
+// --- bail 首个非 undefined 即停 --------
 
 test("bail stops at the first non-undefined result", async () => {
   const bus = new EventBus();
@@ -368,7 +368,7 @@ test("bail passes arguments through to every listener", async () => {
   ]);
 });
 
-// --- dispatch safety -----------------------------------------------------
+// --- 派发过程中的订阅安全 --------
 
 test("unsubscribing during dispatch does not skip listeners", () => {
   const bus = new EventBus();
@@ -381,7 +381,7 @@ test("unsubscribing during dispatch does not skip listeners", () => {
   bus.on("e", b);
   bus.on("e", () => void order.push("c"));
   bus.emit("e");
-  // snapshot semantics: b still runs this round, c is not lost
+  // 快照语义：b 本轮仍会执行，c 也不会被漏掉
   assert.deepEqual(order, ["a", "b", "c"]);
 });
 
@@ -398,7 +398,7 @@ test("subscribing during dispatch does not affect the current round", () => {
   assert.deepEqual(order, ["a", "a", "late"]);
 });
 
-// --- Context integration -------------------------------------------------
+// --- 与 Context 集成 --------
 
 test("Context exposes an EventBus via resolve('events')", () => {
   const ctx = new Context();
@@ -424,7 +424,7 @@ test("ctx.on / ctx.emit work as proxies", () => {
 test("all five modes are reachable from Context", async () => {
   const ctx = new Context();
 
-  // each mode gets a listener with a signature it can actually consume
+  // 每种模式各给一个它能真正消费的签名的监听器
   ctx.on("serial-ev", (a: number, b: number) => a + b);
   ctx.on("parallel-ev", (a: number) => a * 2);
   ctx.on("waterfall-ev", (v: number, next: (n: number) => void) => next(v + 1));
@@ -467,7 +467,7 @@ test("dispose clears all listeners, including those added via ctx.on", async () 
   ctx.on("a", () => {});
   ctx.on("b", () => {});
   bus.on("c", () => {});
-  // also register through a plugin-style external reference
+  // 另外模拟插件持有的外部引用注册
   const unsubscribe = ctx.on("d", () => {});
 
   assert.equal(bus.listenerCount("a"), 2);
@@ -481,7 +481,7 @@ test("dispose clears all listeners, including those added via ctx.on", async () 
     assert.equal(bus.listenerCount(ev), 0, `listeners left on "${ev}"`);
   }
   assert.equal(bus.isDisposed, true);
-  // A retained unsubscribe handle must be harmless after disposal.
+  // 已持有的取消订阅句柄在销毁后调用必须是安全的。
   assert.doesNotThrow(() => unsubscribe());
 });
 
@@ -522,7 +522,7 @@ test("dispose keeps working even if a disposer emits", async () => {
   assert.equal(emitted, true);
 });
 
-// --- Runner ---------------------------------------------------------------
+// --- 测试运行器 --------
 
 async function main(): Promise<void> {
   let passed = 0;

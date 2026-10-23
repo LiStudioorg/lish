@@ -1,19 +1,19 @@
 /**
- * Session service: a registry of live sessions, plus the factory used by
- * plugins so they never have to reach for the `Session` class directly.
+ * 会话服务：活跃会话的注册表，同时也是创建会话的工厂，
+ * 这样插件无需直接依赖 `Session` 类。
  *
- * Mounted as `ctx.sessions`. Sessions created through the service are tracked
- * and disposed with the kernel; `Session` itself has no timers or handles, so
- * disposal means "forget it", not "tear it down" — the JSONL on disk stays.
+ * 以 `ctx.sessions` 挂载。通过本服务创建的会话会被登记，并随内核一起销毁；
+ * `Session` 本身不持有定时器或文件句柄，所以「销毁」等同于「忘掉它」，
+ * 磁盘上的 JSONL 文件不受影响。
  */
 
 import type { Context } from "../kernel/context.js";
 import { Session, type SessionOptions } from "./session.js";
 
 export interface SessionServiceOptions {
-  /** Default options applied to every session created via `create()`. */
+  /** 通过 `create()` 创建会话时应用的默认选项。 */
   defaults?: SessionOptions;
-  /** Directory to write `<id>.jsonl` files into. Omit for memory-only. */
+  /** 写入 `<id>.jsonl` 的目录；省略则纯内存运行。 */
   dir?: string;
 }
 
@@ -30,7 +30,7 @@ export class SessionService {
     this.options = options;
   }
 
-  /** Create a session, register it, and emit `sessions:created`. */
+  /** 创建并登记一个会话，同时发出 `sessions:created` 事件。 */
   create(options: SessionOptions = {}): Session {
     const merged: SessionOptions = {
       ...this.options.defaults,
@@ -47,7 +47,7 @@ export class SessionService {
     return session;
   }
 
-  /** Adopt an externally constructed session (e.g. from `Session.load`). */
+  /** 接管一个在外部构造好的会话（例如来自 `Session.load`）。 */
   register(session: Session): Session {
     this.sessions.set(session.id, session);
     this.ctx.emit(SessionService.CREATED, { sessionId: session.id, session });
@@ -58,7 +58,7 @@ export class SessionService {
     return this.sessions.get(id);
   }
 
-  /** Get a session or throw — for call sites that require an existing one. */
+  /** 取会话，不存在则抛错——用于「必须已存在」的调用点。 */
   require(id: string): Session {
     const session = this.sessions.get(id);
     if (!session) throw new Error(`Unknown session: ${id}`);
@@ -77,12 +77,12 @@ export class SessionService {
     return this.sessions.size;
   }
 
-  /** Forget a session (the JSONL file is untouched). */
+  /** 忘记一个会话（磁盘上的 JSONL 文件保持不变）。 */
   remove(id: string): boolean {
     return this.sessions.delete(id);
   }
 
-  /** Flush every tracked session's pending writes. */
+  /** 冲洗所有已登记会话的待写入数据。 */
   async flushAll(): Promise<void> {
     await Promise.all([...this.sessions.values()].map((s) => s.flush()));
   }

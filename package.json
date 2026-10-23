@@ -9,7 +9,9 @@
     "test:kernel": "node --no-warnings --loader ts-node/esm src/kernel/test.ts",
     "test:events": "node --no-warnings --loader ts-node/esm src/kernel/test-events.ts",
     "test:core": "node --no-warnings --loader ts-node/esm src/core/test-session-llm.ts",
-    "test:agent": "node --no-warnings --loader ts-node/esm src/core/test-agent.ts"
+    "test:agent": "node --no-warnings --loader ts-node/esm src/core/test-agent.ts",
+    "test:fs": "node --no-warnings --loader ts-node/esm src/tools/test-fs.ts",
+    "test:openai": "node --no-warnings --loader ts-node/esm src/core/providers/test-openai.ts"
   },
   "repository": {
     "type": "git",
