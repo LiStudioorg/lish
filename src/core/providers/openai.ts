@@ -53,6 +53,16 @@ export interface OpenAIProviderOptions {
   fetchImpl?: typeof fetch;
   /** Provider 名称，默认 "openai"。 */
   name?: string;
+  /**
+   * 是否使用 `stream: true` 请求 SSE 流。
+   *
+   * 说明：开启后仍会聚合成完整的 `GenerateResult` 返回（非增量对外），
+   * 目的是让 TUI/Web 能更早拿到首个 token。若服务端不支持流式，
+   * 会捕获错误并自动回退为非流式请求。
+   */
+  stream?: boolean;
+  /** 收到增量文本片段时回调（仅 stream 模式）。 */
+  onTextDelta?: (delta: string) => void;
 }
 
 // --- OpenAI 线格式类型 ----------------------------------------------------
@@ -273,6 +283,8 @@ export class OpenAIProvider implements LlmProvider {
   private readonly headers: Record<string, string>;
   private readonly timeoutMs: number;
   private readonly fetchImpl: typeof fetch;
+  private readonly stream: boolean;
+  private readonly onTextDelta?: (delta: string) => void;
 
   constructor(options: OpenAIProviderOptions) {
     if (!options.apiKey) {
@@ -286,6 +298,8 @@ export class OpenAIProvider implements LlmProvider {
     this.headers = options.headers ?? {};
     this.timeoutMs = options.timeoutMs ?? 60_000;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    this.stream = options.stream ?? false;
+    this.onTextDelta = options.onTextDelta;
     if (typeof this.fetchImpl !== "function") {
       throw new OpenAIProviderError(
         "No fetch implementation available (Node >= 18 is required)",
@@ -312,6 +326,28 @@ export class OpenAIProvider implements LlmProvider {
   }
 
   async generate(
+    messages: Message[],
+    options: GenerateOptions = {},
+  ): Promise<GenerateResult> {
+    if (this.stream) {
+      try {
+        return await this.generateStreaming(messages, options);
+      } catch (err) {
+        // 部分兼容服务并不真正支持 stream：典型表现是 HTTP 400/404，
+        // 因此这里**不能**因 retryable=false 就放弃——恰恰相反，
+        // 4xx 才是最需要回退的信号。只有鉴权失败（401/403）才直接抛出，
+        // 因为那与流式能力无关，回退也一样会失败。
+        if (err instanceof OpenAIProviderError && (err.status === 401 || err.status === 403)) {
+          throw err;
+        }
+        return this.generateOnce(messages, options);
+      }
+    }
+    return this.generateOnce(messages, options);
+  }
+
+  /** 非流式请求（原有实现）。 */
+  private async generateOnce(
     messages: Message[],
     options: GenerateOptions = {},
   ): Promise<GenerateResult> {
@@ -374,5 +410,179 @@ export class OpenAIProvider implements LlmProvider {
     }
 
     return fromOpenAIResponse(parsed as OpenAIChatResponse, this.name);
+  }
+
+  /**
+   * 流式请求：解析 SSE，累积增量内容与工具调用分片。
+   *
+   * 工具调用的参数在流中是以**碎片**形式到达的（同一个 index 多次追加），
+   * 因此这里按 index 归并，最后再交给 `parseOpenAIToolCalls` 统一解析。
+   */
+  private async generateStreaming(
+    messages: Message[],
+    options: GenerateOptions = {},
+  ): Promise<GenerateResult> {
+    const url = `${this.baseURL}/chat/completions`;
+    const body = { ...this.buildRequestBody(messages, options), stream: true };
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    let response: Response;
+    try {
+      response = await this.fetchImpl(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${this.apiKey}`,
+          accept: "text/event-stream",
+          ...this.headers,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === "AbortError";
+      throw new OpenAIProviderError(
+        aborted
+          ? `Streaming request to ${url} timed out after ${this.timeoutMs}ms`
+          : `Network error calling ${url}: ${err instanceof Error ? err.message : String(err)}`,
+        undefined,
+        undefined,
+        true,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new OpenAIProviderError(
+        `HTTP ${response.status} from ${url}: ${text.slice(0, 200)}`,
+        response.status,
+        text,
+        response.status === 429 || response.status >= 500,
+      );
+    }
+
+    if (!response.body) {
+      throw new OpenAIProviderError("Streaming response had no body", undefined, undefined, true);
+    }
+
+    let text = "";
+    let finishReason: string | null | undefined;
+    let usage: OpenAIChatResponse["usage"];
+    let model: string | undefined;
+    // index -> 累积的 tool_call 分片
+    const callBuffers = new Map<number, { id: string; name: string; args: string }>();
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE 以空行分隔事件；这里按行处理并保留未完成的部分。
+        let newlineIndex: number;
+        while ((newlineIndex = buffer.indexOf("\n")) !== -1) {
+          const line = buffer.slice(0, newlineIndex).trim();
+          buffer = buffer.slice(newlineIndex + 1);
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") {
+            buffer = "";
+            break;
+          }
+          if (payload.length === 0) continue;
+
+          let chunk: {
+            model?: string;
+            usage?: OpenAIChatResponse["usage"];
+            choices?: Array<{
+              delta?: {
+                content?: string | null;
+                tool_calls?: Array<{
+                  index?: number;
+                  id?: string;
+                  function?: { name?: string; arguments?: string };
+                }>;
+              };
+              finish_reason?: string | null;
+            }>;
+          };
+          try {
+            chunk = JSON.parse(payload);
+          } catch {
+            continue; // 忽略无法解析的心跳/注释行
+          }
+
+          model = chunk.model ?? model;
+          if (chunk.usage) usage = chunk.usage;
+
+          const choice = chunk.choices?.[0];
+          if (!choice) continue;
+          if (choice.finish_reason) finishReason = choice.finish_reason;
+
+          const delta = choice.delta;
+          if (delta?.content) {
+            text += delta.content;
+            this.onTextDelta?.(delta.content);
+          }
+
+          for (const tc of delta?.tool_calls ?? []) {
+            const index = tc.index ?? 0;
+            const existing = callBuffers.get(index) ?? { id: "", name: "", args: "" };
+            if (tc.id) existing.id = tc.id;
+            if (tc.function?.name) existing.name += tc.function.name;
+            if (tc.function?.arguments) existing.args += tc.function.arguments;
+            callBuffers.set(index, existing);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock?.();
+    }
+
+    const toolCalls: ToolCall[] = [...callBuffers.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([index, buf]) => ({
+        id: buf.id || `call_stream_${index}`,
+        name: buf.name,
+        arguments: safeParseArgs(buf.args),
+      }));
+
+    return {
+      text,
+      toolCalls,
+      finishReason: toolCalls.length > 0 ? "tool_calls" : fromOpenAIFinishReason(finishReason),
+      provider: this.name,
+      ...(usage
+        ? {
+            usage: {
+              inputTokens: usage.prompt_tokens,
+              outputTokens: usage.completion_tokens,
+            },
+          }
+        : {}),
+    };
+  }
+}
+
+/** 解析工具参数碎片；失败时保留原始串，交由上层报错。 */
+function safeParseArgs(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return {};
+  try {
+    const value = JSON.parse(trimmed);
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return value as Record<string, unknown>;
+    }
+    return { value };
+  } catch {
+    return { _rawArguments: raw, _parseError: true };
   }
 }

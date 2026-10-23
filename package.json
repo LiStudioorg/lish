@@ -4,14 +4,23 @@
   "description": "",
   "main": "index.js",
   "type": "module",
+  "bin": {
+    "lish": "./src/cli.ts"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "test:kernel": "node --no-warnings --loader ts-node/esm src/kernel/test.ts",
-    "test:events": "node --no-warnings --loader ts-node/esm src/kernel/test-events.ts",
-    "test:core": "node --no-warnings --loader ts-node/esm src/core/test-session-llm.ts",
-    "test:agent": "node --no-warnings --loader ts-node/esm src/core/test-agent.ts",
-    "test:fs": "node --no-warnings --loader ts-node/esm src/tools/test-fs.ts",
-    "test:openai": "node --no-warnings --loader ts-node/esm src/core/providers/test-openai.ts"
+    "test": "tsx scripts/run-tests.ts",
+    "test:kernel": "tsx src/kernel/test.ts",
+    "test:events": "tsx src/kernel/test-events.ts",
+    "test:core": "tsx src/core/test-session-llm.ts",
+    "test:agent": "tsx src/core/test-agent.ts",
+    "test:fs": "tsx src/tools/test-fs.ts",
+    "test:openai": "tsx src/core/providers/test-openai.ts",
+    "test:stream": "tsx src/core/test-stream.ts",
+    "start:tui": "tsx src/tui.tsx",
+    "start:web": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\"",
+    "start": "tsx src/cli.ts",
+    "start:web:api": "tsx src/server.ts",
+    "build:web": "cd web && npm run build"
   },
   "repository": {
     "type": "git",
@@ -25,8 +34,22 @@
   },
   "homepage": "https://github.com/LiStudioorg/lish#readme",
   "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
+    "@types/react": "^19.3.0",
+    "concurrently": "^10.0.6",
     "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "ai": "^4.3.19",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "ink": "^8.0.0",
+    "ink-text-input": "^6.0.0",
+    "react": "^19.3.1",
+    "react-devtools-core": "^8.0.0"
   }
 }

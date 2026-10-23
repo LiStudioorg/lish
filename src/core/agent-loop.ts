@@ -23,6 +23,59 @@ export const AGENT_STEP = "agent:step";
 export const AGENT_COMPLETE = "agent:complete";
 export const AGENT_ABORTED = "agent:aborted";
 
+// --- 流式事件（供 TUI / Web 等前端实时消费）------------------------------
+
+/** 模型开始思考（每一步模型调用之前派发）。 */
+export const AGENT_THINKING = "agent:thinking";
+/** 模型决定调用某个工具。 */
+export const AGENT_TOOL_CALL = "agent:tool_call";
+/** 工具执行完毕。 */
+export const AGENT_TOOL_RESULT = "agent:tool_result";
+/** 模型给出最终回答（本轮的收尾文本）。 */
+export const AGENT_ANSWER = "agent:answer";
+
+/** `agent:thinking` 的载荷。 */
+export interface AgentThinkingPayload {
+  runId: string;
+  sessionId: string;
+  /** 第几步（从 1 开始）。 */
+  step: number;
+  /** 本轮发送给模型的消息条数，便于前端展示上下文规模。 */
+  messageCount: number;
+}
+
+/** `agent:tool_call` 的载荷。 */
+export interface AgentToolCallPayload {
+  runId: string;
+  sessionId: string;
+  step: number;
+  /** 工具调用 id，可与 tool_result 配对。 */
+  callId: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+/** `agent:tool_result` 的载荷。 */
+export interface AgentToolResultPayload {
+  runId: string;
+  sessionId: string;
+  step: number;
+  callId: string;
+  name: string;
+  content: string;
+  isError: boolean;
+  durationMs: number;
+}
+
+/** `agent:answer` 的载荷。 */
+export interface AgentAnswerPayload {
+  runId: string;
+  sessionId: string;
+  /** 最终回答文本。 */
+  text: string;
+  stopReason: AgentStopReason;
+}
+
 export interface AgentLoopOptions {
   /** 单次 `run` 允许的最大模型轮次，默认 8。 */
   maxSteps?: number;
@@ -120,6 +173,8 @@ export class AgentLoop {
     // 1. 先记录用户输入：日志先行，模型随后。
     session.appendUserMessage(user);
 
+    // 每次 run 生成唯一 id，前端可据此区分并发/连续的多次运行。
+    const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     const steps: AgentStepRecord[] = [];
     let toolCallsExecuted = 0;
     let stopReason: AgentStopReason = "stop";
@@ -134,6 +189,15 @@ export class AgentLoop {
         const messages = session.deriveMessages({
           hoistSystem: this.options.hoistSystem,
         });
+
+        // 派发「思考中」：必须在调用模型之前发出，
+        // 这样前端能立刻显示加载态，而不是等模型返回后才更新。
+        this.ctx.emit(AGENT_THINKING, {
+          runId,
+          sessionId: session.id,
+          step: step + 1,
+          messageCount: messages.length,
+        } satisfies AgentThinkingPayload);
 
         const result = await this.llm.generate(messages, {
           tools: this.tools.schemas(),
@@ -183,6 +247,18 @@ export class AgentLoop {
         // 5. 逐个执行调用并记录结果。
         for (const call of result.toolCalls) {
           toolCallsExecuted++;
+
+          // 执行前先告知前端「要调用什么」，便于实时展示。
+          this.ctx.emit(AGENT_TOOL_CALL, {
+            runId,
+            sessionId: session.id,
+            step: step + 1,
+            callId: call.id,
+            name: call.name,
+            args: call.arguments,
+          } satisfies AgentToolCallPayload);
+
+          const startedAt = Date.now();
           let content: string;
           let isError = false;
 
@@ -211,6 +287,18 @@ export class AgentLoop {
             content,
             ...(isError ? { isError: true } : {}),
           });
+
+          // 结果落日志之后再派发，保证「事件到达前端时日志已可回放」。
+          this.ctx.emit(AGENT_TOOL_RESULT, {
+            runId,
+            sessionId: session.id,
+            step: step + 1,
+            callId: call.id,
+            name: call.name,
+            content,
+            isError,
+            durationMs: Date.now() - startedAt,
+          } satisfies AgentToolResultPayload);
         }
 
         if (step === this.options.maxSteps - 1) {
@@ -232,10 +320,29 @@ export class AgentLoop {
       ...(error ? { error } : {}),
     });
 
-    if (stopReason === "error" || stopReason === "max_steps" || stopReason === "max_tool_calls" || stopReason === "repeated_call") {
-      this.ctx.emit(AGENT_ABORTED, { sessionId: session.id, stopReason, error });
+    // 最终回答：无论正常结束还是异常收敛，前端都需要一个明确的终点，
+    // 否则 SSE / TUI 会一直挂着加载态。
+    this.ctx.emit(AGENT_ANSWER, {
+      runId,
+      sessionId: session.id,
+      text,
+      stopReason,
+    } satisfies AgentAnswerPayload);
+
+    if (
+      stopReason === "error" ||
+      stopReason === "max_steps" ||
+      stopReason === "max_tool_calls" ||
+      stopReason === "repeated_call"
+    ) {
+      this.ctx.emit(AGENT_ABORTED, { runId, sessionId: session.id, stopReason, error });
     } else {
-      this.ctx.emit(AGENT_COMPLETE, { sessionId: session.id, stopReason, steps: steps.length });
+      this.ctx.emit(AGENT_COMPLETE, {
+        runId,
+        sessionId: session.id,
+        stopReason,
+        steps: steps.length,
+      });
     }
 
     return {
