@@ -177,13 +177,29 @@ function startStreaming(sessionId: string, userText: string) {
   // 工具事件按 callId 去重：先建卡片，结果回来后再更新同一张卡片
   const toolIndex = new Map<string, number>()
 
-  function appendText(delta: string) {
+  // 文本增量缓冲：按动画帧合并写入，避免每个 token 都触发一次全量重渲染。
+  let pendingText = ''
+  let flushHandle: number | null = null
+
+  function flushText() {
+    flushHandle = null
+    if (pendingText.length === 0) return
+    const chunk = pendingText
+    pendingText = ''
     const session = store.sessions.find(s => s.id === sessionId)
     const msg = session?.messages.find(m => m.id === assistantMsg.id)
     store.updateMessage(sessionId, assistantMsg.id, {
-      content: (msg?.content ?? '') + delta,
+      content: (msg?.content ?? '') + chunk,
       status: 'streaming' as const,
     })
+  }
+
+  function appendText(delta: string) {
+    pendingText += delta
+    if (flushHandle === null) {
+      // requestAnimationFrame 在标签页不可见时会暂停，这里用 setTimeout 兜底。
+      flushHandle = window.setTimeout(flushText, 16)
+    }
   }
 
   function handleEvent(event: ToolStreamEvent) {
@@ -232,6 +248,11 @@ function startStreaming(sessionId: string, userText: string) {
     onText: appendText,
     onEvent: handleEvent,
     onDone: info => {
+      if (flushHandle !== null) {
+        clearTimeout(flushHandle)
+        flushHandle = null
+      }
+      flushText()
       const session = store.sessions.find(s => s.id === sessionId)
       const msg = session?.messages.find(m => m.id === assistantMsg.id)
       store.updateMessage(sessionId, assistantMsg.id, {
@@ -244,6 +265,11 @@ function startStreaming(sessionId: string, userText: string) {
       store.setStreaming(false)
     },
     onError: err => {
+      if (flushHandle !== null) {
+        clearTimeout(flushHandle)
+        flushHandle = null
+      }
+      flushText()
       store.updateMessage(sessionId, assistantMsg.id, {
         status: 'error' as const,
         content: `请求失败：${err.message}`,

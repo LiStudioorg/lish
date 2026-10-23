@@ -30,10 +30,17 @@ export interface ToolStreamEvent {
   error?: string
 }
 
-/** 后端地址：优先环境变量，默认本机 3000。 */
+/**
+ * 后端地址。
+ *
+ * 默认使用**空字符串**即同源相对路径 `/api/...`，由 Vite 代理转发到后端。
+ * 这样手机通过 `http://局域网IP:3081` 访问时，请求会自动发往同一主机，
+ * 不会因为写死 localhost 而指向手机自己。
+ *
+ * 如需直连后端（不经代理），设置 VITE_API_BASE=http://<ip>:3000。
+ */
 export const API_BASE: string =
-  (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE ??
-  'http://localhost:3000'
+  (import.meta as unknown as { env?: Record<string, string> }).env?.VITE_API_BASE ?? ''
 
 /** 协议帧类型。 */
 type Frame =

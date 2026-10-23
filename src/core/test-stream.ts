@@ -16,6 +16,7 @@ import { createServer } from "node:http";
 import { Context } from "../kernel/context.js";
 import {
   AGENT_ANSWER,
+  AGENT_STREAM_DELTA,
   AGENT_THINKING,
   AGENT_TOOL_CALL,
   AGENT_TOOL_RESULT,
@@ -485,6 +486,13 @@ test("POST /api/chat 返回 AI SDK 数据流，含工具事件与最终文本", 
     assert.equal(toolResult.isError, false);
 
     assert.ok(texts.join("").includes("Summary of tool results"), "必须包含最终文本");
+    // 关键：文本必须以**多个** `0:` 帧增量送达，而不是一个整段帧。
+    // 这是打字机效果的数据前提（本测试跑的是 MockProvider 的 50ms 分块流）。
+    assert.ok(texts.length > 1, `文本应为多帧增量，实际 ${texts.length} 帧`);
+    assert.ok(
+      texts.length > 5,
+      `帧数偏少（${texts.length}），可能退回一次性推送`,
+    );
     // AI SDK v4 不发送 v3 时代的 `d:` 结束帧；连接关闭即流结束，
     // 前端 useChat 通过 reader 收到 done 判定完成。
     void finished;
@@ -625,6 +633,115 @@ test("客户端断开后不留事件监听器（无内存泄漏）", async () =>
     await new Promise<void>((r) => server.close(() => r()));
     await runtime.shutdown();
   }
+});
+
+// --- Token 级真流式 -------------------------------------------------------
+
+test("AgentLoop 派发 agent:stream_delta 增量事件", async () => {
+  const ctx = new Context();
+  const sessions = new SessionService(ctx);
+  ctx.provide(SessionService.KEY, sessions);
+  const llm = new LlmRuntime(ctx, { provider: new MockProvider() });
+  ctx.provide(LlmRuntime.KEY, llm);
+  const tools = new ToolRegistry(ctx);
+  ctx.provide(ToolRegistry.KEY, tools);
+  tools.register({ name: "echo", handler: (a) => String(a.text ?? "") });
+  const agent = new AgentLoop(ctx, { maxSteps: 4 });
+  ctx.provide(AgentLoop.KEY, agent);
+
+  const deltas: string[] = [];
+  ctx.on(AGENT_STREAM_DELTA, (p: { delta: string }) => deltas.push(p.delta));
+
+  await agent.run(sessions.create(), "hi");
+
+  assert.ok(deltas.length > 1, `应收到多个增量，实际 ${deltas.length}`);
+  const joined = deltas.join("");
+  assert.match(joined, /Summary of tool results/);
+  assert.equal(joined, deltas.reduce((a, b) => a + b, ""));
+
+  await ctx.dispose();
+});
+
+test("增量事件确实发生在 generate 返回之前（真流式而非一次性）", async () => {
+  const ctx = new Context();
+  const sessions = new SessionService(ctx);
+  ctx.provide(SessionService.KEY, sessions);
+
+  // 可控 Provider：手动控制何时吐增量、何时返回
+  const llm = new LlmRuntime(ctx, {
+    provider: {
+      name: "controlled",
+      async generate(_m, options) {
+        options.onTextDelta?.("第一段");
+        await new Promise((r) => setTimeout(r, 30));
+        options.onTextDelta?.("第二段");
+        return {
+          text: "第一段第二段",
+          toolCalls: [],
+          finishReason: "stop" as const,
+          provider: "controlled",
+        };
+      },
+    },
+  });
+  ctx.provide(LlmRuntime.KEY, llm);
+  const tools = new ToolRegistry(ctx);
+  ctx.provide(ToolRegistry.KEY, tools);
+  const agent = new AgentLoop(ctx, {});
+  ctx.provide(AgentLoop.KEY, agent);
+
+  const timeline: string[] = [];
+  ctx.on(AGENT_STREAM_DELTA, (p: { delta: string }) => timeline.push(`delta:${p.delta}`));
+  ctx.on(AGENT_ANSWER, () => timeline.push("answer"));
+
+  await agent.run(sessions.create(), "hi");
+
+  // 两个增量必须都排在 answer 之前
+  assert.deepEqual(timeline, ["delta:第一段", "delta:第二段", "answer"]);
+
+  await ctx.dispose();
+});
+
+test("MockProvider 支持 onTextDelta，并按块吐出", async () => {
+  const provider = new MockProvider({ chunkSize: 2, chunkDelayMs: 5 });
+  const deltas: string[] = [];
+  const result = await provider.generate(
+    [
+      { role: "user", content: "hi" },
+      { role: "tool", tool: { toolCallId: "c1", name: "echo", content: "pong" } },
+    ],
+    { onTextDelta: (d) => deltas.push(d) },
+  );
+
+  assert.ok(deltas.length > 1, `应分多块吐出，实际 ${deltas.length}`);
+  assert.ok(deltas.every((d) => d.length <= 2), "每块不应超过 chunkSize");
+  assert.equal(deltas.join(""), result.text);
+});
+
+test("OpenAIProvider 优先使用本次调用传入的 onTextDelta", async () => {
+  const sse = (obj: unknown) => `data: ${JSON.stringify(obj)}\n\n`;
+  const fetchImpl = (async () => {
+    const body = new ReadableStream<Uint8Array>({
+      start(c) {
+        const enc = new TextEncoder();
+        c.enqueue(enc.encode(sse({ choices: [{ delta: { content: "A" } }] })));
+        c.enqueue(enc.encode(sse({ choices: [{ delta: { content: "B" } }] })));
+        c.enqueue(enc.encode("data: [DONE]\n\n"));
+        c.close();
+      },
+    });
+    return new Response(body, { status: 200 });
+  }) as unknown as typeof fetch;
+
+  const perCall: string[] = [];
+  const provider = new OpenAIProvider({ apiKey: "k", fetchImpl });
+  // 不设 stream:true，仅靠传入 onTextDelta 也应触发流式
+  const result = await provider.generate([{ role: "user", content: "hi" }], {
+    onTextDelta: (d) => perCall.push(d),
+  });
+
+  assert.deepEqual(perCall, ["A", "B"]);
+  assert.equal(result.text, "AB");
 });
 
 // --- Runner ---------------------------------------------------------------

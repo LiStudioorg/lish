@@ -21,15 +21,22 @@ export default defineConfig({
     },
   },
   server: {
-    // 与后端 CORS 白名单保持一致；显式绑 IPv4 避免只监听 ::1
-    host: '127.0.0.1',
-    port: 5173,
+    // 监听所有网卡，允许手机/平板通过局域网 IP 访问
+    host: '0.0.0.0',
+    port: 3081,
     strictPort: true,
     proxy: {
-      // 开发期也可走同源代理，避免浏览器跨域限制
+      // 前端一律请求同源 /api/*，由 Vite 代理到后端，
+      // 避免硬编码 localhost 导致手机访问失败。
       '/api': {
         target: 'http://127.0.0.1:3000',
         changeOrigin: true,
+        // SSE/流式响应需要关闭代理缓冲
+        configure: proxy => {
+          proxy.on('proxyRes', proxyRes => {
+            proxyRes.headers['cache-control'] = 'no-cache, no-transform'
+          })
+        },
       },
     },
   },

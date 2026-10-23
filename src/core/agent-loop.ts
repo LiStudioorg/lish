@@ -33,6 +33,13 @@ export const AGENT_TOOL_CALL = "agent:tool_call";
 export const AGENT_TOOL_RESULT = "agent:tool_result";
 /** 模型给出最终回答（本轮的收尾文本）。 */
 export const AGENT_ANSWER = "agent:answer";
+/**
+ * 文本增量（Token 级流式）。
+ *
+ * 在模型仍在生成时就逐段派发，前端据此实现打字机效果；
+ * 与 `agent:answer` 的区别：后者是本轮结束时的完整文本，前者是过程增量。
+ */
+export const AGENT_STREAM_DELTA = "agent:stream_delta";
 
 /** `agent:thinking` 的载荷。 */
 export interface AgentThinkingPayload {
@@ -65,6 +72,15 @@ export interface AgentToolResultPayload {
   content: string;
   isError: boolean;
   durationMs: number;
+}
+
+/** `agent:stream_delta` 的载荷。 */
+export interface AgentStreamDeltaPayload {
+  runId: string;
+  sessionId: string;
+  step: number;
+  /** 本次增量文本。 */
+  delta: string;
 }
 
 /** `agent:answer` 的载荷。 */
@@ -202,6 +218,15 @@ export class AgentLoop {
         const result = await this.llm.generate(messages, {
           tools: this.tools.schemas(),
           ...this.options.generateOptions,
+          // 边生成边派发增量事件：这是打字机效果的数据来源。
+          onTextDelta: (delta: string) => {
+            this.ctx.emit(AGENT_STREAM_DELTA, {
+              runId,
+              sessionId: session.id,
+              step: step + 1,
+              delta,
+            } satisfies AgentStreamDeltaPayload);
+          },
         });
 
         // 2. 原样记录 assistant 本轮输出。

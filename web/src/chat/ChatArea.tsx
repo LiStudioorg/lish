@@ -73,7 +73,10 @@ export function ChatArea({ activeSessionId, convTab = '对话' }: ChatAreaProps)
   useEffect(() => {
     const unsub = subscribe(() => {
       const session = store.sessions.find(s => s.id === activeSessionId)
-      setMessages(session?.messages ?? [])
+      // 必须浅拷贝：store 是原地修改 message.content 的，
+      // 若直接传原数组，React 会认为引用未变而跳过重渲染，
+      // 导致流式文本只在结束时一次性出现（打字机效果失效）。
+      setMessages(session ? [...session.messages.map(m => ({ ...m }))] : [])
       setIsStreaming(store.isStreaming)
       setStreamingStartTime(store.streamingStartTime)
       setAutoScroll(store.settings.autoScroll)

@@ -329,7 +329,10 @@ export class OpenAIProvider implements LlmProvider {
     messages: Message[],
     options: GenerateOptions = {},
   ): Promise<GenerateResult> {
-    if (this.stream) {
+    // 只要本次调用需要增量回调，就必须走流式；否则构造时开启的 stream 也生效。
+    const wantStream = this.stream || typeof options.onTextDelta === "function";
+
+    if (wantStream) {
       try {
         return await this.generateStreaming(messages, options);
       } catch (err) {
@@ -530,7 +533,10 @@ export class OpenAIProvider implements LlmProvider {
           const delta = choice.delta;
           if (delta?.content) {
             text += delta.content;
-            this.onTextDelta?.(delta.content);
+            // 优先使用本次调用传入的回调（Agent 循环用），
+            // 其次回退到构造时注册的回调（全局观察者）。
+            const cb = options.onTextDelta ?? this.onTextDelta;
+            if (cb) cb(delta.content);
           }
 
           for (const tc of delta?.tool_calls ?? []) {

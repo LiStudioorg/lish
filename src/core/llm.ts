@@ -80,6 +80,13 @@ export interface GenerateOptions {
   maxTokens?: number;
   /** 本轮允许模型调用的工具。 */
   tools?: ToolSchema[];
+  /**
+   * 文本增量回调（Token 级流式）。
+   *
+   * Provider 每收到一段文本增量就立即调用它，上层据此实现打字机效果。
+   * 注意：回调触发时 `generate` 尚未返回，最终仍会返回聚合后的完整结果。
+   */
+  onTextDelta?: (delta: string) => void;
   /** 其余厂商特定参数原样透传。 */
   [key: string]: unknown;
 }
@@ -133,6 +140,10 @@ export interface MockProviderOptions {
   summaryPrefix?: string;
   /** 人为延迟（毫秒），用于测试并发行为。 */
   delayMs?: number;
+  /** 模拟流式时每块字符数，默认 3。 */
+  chunkSize?: number;
+  /** 模拟流式时块间间隔（毫秒），默认 50。 */
+  chunkDelayMs?: number;
 }
 
 export class MockProvider implements LlmProvider {
@@ -147,6 +158,8 @@ export class MockProvider implements LlmProvider {
       toolArguments: options.toolArguments ?? { text: "hello from mock" },
       summaryPrefix: options.summaryPrefix ?? "Summary of tool results",
       delayMs: options.delayMs ?? 0,
+      chunkSize: options.chunkSize ?? 3,
+      chunkDelayMs: options.chunkDelayMs ?? 50,
     };
   }
 
@@ -155,9 +168,26 @@ export class MockProvider implements LlmProvider {
     return this.seq;
   }
 
+  /**
+   * 把文本切块逐段回调，模拟真实模型的 Token 流。
+   * 默认每块 3 个字符、间隔 50ms，可由构造参数调整。
+   */
+  private async emitChunks(
+    text: string,
+    onDelta: (delta: string) => void,
+  ): Promise<void> {
+    const size = Math.max(1, this.options.chunkSize);
+    for (let i = 0; i < text.length; i += size) {
+      onDelta(text.slice(i, i + size));
+      if (this.options.chunkDelayMs > 0) {
+        await new Promise((r) => setTimeout(r, this.options.chunkDelayMs));
+      }
+    }
+  }
+
   async generate(
     messages: Message[],
-    _options: GenerateOptions = {},
+    options: GenerateOptions = {},
   ): Promise<GenerateResult> {
     this.seq++;
     if (this.options.delayMs > 0) {
@@ -170,8 +200,15 @@ export class MockProvider implements LlmProvider {
       const lines = toolMessages.map(
         (m) => `- ${m.tool?.name ?? m.tool?.toolCallId ?? "tool"}: ${m.tool?.content ?? ""}`,
       );
+      const text = `${this.options.summaryPrefix} (${toolMessages.length}):\n${lines.join("\n")}`;
+
+      // 模拟流式：按小块吐出文本，每块之间 sleep，便于无 Key 时验证打字机效果。
+      if (typeof options.onTextDelta === "function") {
+        await this.emitChunks(text, options.onTextDelta);
+      }
+
       return {
-        text: `${this.options.summaryPrefix} (${toolMessages.length}):\n${lines.join("\n")}`,
+        text,
         toolCalls: [],
         finishReason: "stop",
         provider: this.name,

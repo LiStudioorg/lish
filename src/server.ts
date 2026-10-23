@@ -14,6 +14,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { networkInterfaces } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,7 @@ import { createDataStreamResponse, type JSONValue } from "ai";
 import {
   AGENT_ABORTED,
   AGENT_ANSWER,
+  AGENT_STREAM_DELTA,
   AGENT_THINKING,
   AGENT_TOOL_CALL,
   AGENT_TOOL_RESULT,
@@ -31,9 +33,26 @@ import {
 import type { Runtime } from "./runtime.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
-// 前端构建产物：`npm run build:web` 会输出到 web/dist。
-// 开发期由 Vite dev server（5173）提供页面，这里的静态目录只用于生产单进程部署。
-const publicDir = join(here, "..", "web", "dist");
+
+/**
+ * 定位前端构建产物目录（web/dist）。
+ *
+ * 需要兼容两种运行位置：
+ *   - 源码运行（tsx src/server.ts）：<root>/src      -> <root>/web/dist
+ *   - 编译运行（dist/src/server.js）：<root>/dist/src -> <root>/web/dist
+ * 因此逐级上溯查找，而不是写死相对层级。
+ */
+export function resolveWebRoot(startDir: string = here): string | null {
+  let dir = startDir;
+  for (let depth = 0; depth < 5; depth++) {
+    const candidate = join(dir, "web", "dist");
+    if (existsSync(join(candidate, "index.html"))) return candidate;
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
 
 export interface ServerOptions {
   port?: number;
@@ -67,12 +86,36 @@ export function createApp(runtime: Runtime): express.Express {
 
   // CORS：显式允许 Vite 开发服务器。
   // 开发期也可能用到 3081（上游复刻项目的默认端口）与 127.0.0.1 变体。
-  const allowedOrigins = new Set([
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:3081",
-    "http://127.0.0.1:3081",
-  ]);
+  // 允许的来源：
+  //   - 本机各端口（localhost / 127.0.0.1）
+  //   - 局域网任意 IP 的 3081 / 5173 端口（手机、平板访问）
+  // 不写死具体 IP，因为开发机的局域网地址会变化。
+  const allowedPorts = new Set(["3081", "5173", "3000"]);
+  const isAllowedOrigin = (origin: string): boolean => {
+    let url: URL;
+    try {
+      url = new URL(origin);
+    } catch {
+      return false;
+    }
+    if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+    const port = url.port || (url.protocol === "https:" ? "443" : "80");
+    if (!allowedPorts.has(port)) return false;
+    const host = url.hostname;
+    const isLocal =
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "[::1]";
+    const isPrivate =
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2[0-9]|3[01])\./.test(host);
+    return isLocal || isPrivate;
+  };
+  const allowedOrigins = {
+    has: (origin: string) => isAllowedOrigin(origin),
+  };
   app.use(
     cors({
       origin(origin, callback) {
@@ -92,8 +135,19 @@ export function createApp(runtime: Runtime): express.Express {
   );
   app.use(express.json({ limit: "1mb" }));
 
-  if (existsSync(publicDir)) {
-    app.use(express.static(publicDir));
+  const webRoot = resolveWebRoot();
+  if (webRoot) {
+    // 生产模式：直接托管前端构建产物（单进程部署）
+    app.use(
+      express.static(webRoot, {
+        setHeaders(res, filePath) {
+          // 带哈希的静态资源可长缓存；index.html 必须每次校验
+          if (filePath.endsWith("index.html")) {
+            res.setHeader("cache-control", "no-cache");
+          }
+        },
+      }),
+    );
   } else {
     // 开发期常见：尚未构建前端。给出可操作的指引而不是 404 空白页。
     app.get("/", (_req, res) => {
@@ -103,8 +157,8 @@ export function createApp(runtime: Runtime): express.Express {
         .send(
           `<meta charset="utf-8"><body style="font-family:system-ui;background:#0b0d12;color:#e6e8ee;padding:40px">
            <h2>前端尚未构建</h2>
-           <p>开发模式请访问 Vite 服务器：<a style="color:#7aa2ff" href="http://localhost:5173">http://localhost:5173</a></p>
-           <p>或执行 <code>npm run build:web</code> 生成 <code>web/dist</code> 后由本服务托管。</p>
+           <p>请先执行 <code>npm run build</code> 打包前端（生成 <code>web/dist</code>），再重新启动。</p>
+           <p>开发模式下请改用 <code>npm run start:dev</code>（前端由 Vite 提供）。</p>
            <p>接口健康检查：<a style="color:#7aa2ff" href="/api/health">/api/health</a></p>
            </body>`,
         );
@@ -145,12 +199,18 @@ export function createApp(runtime: Runtime): express.Express {
         writer.writeData({ type: "session", sessionId: session.id });
 
         let runId: string | undefined;
+        /** 是否收到过任何文本增量（决定是否需要兜底一次性写入）。 */
+        let sawDelta = false;
         const handlers: Array<[string, (payload: any) => void]> = [];
 
         const cleanup = () => {
           for (const [name, handler] of handlers) runtime.ctx.off(name, handler);
           handlers.length = 0;
         };
+
+        // 客户端一旦断开就立刻解绑，不必等本轮 Agent 跑完。
+        // 否则断开的瞬间监听器仍挂着，既延迟释放，也会继续向已关闭的流写入。
+        res.once("close", cleanup);
 
         // 只转发本次 run 的事件，避免并发请求串台
         const track = (name: string, build: (payload: any) => ToolStreamEvent | null) => {
@@ -165,6 +225,21 @@ export function createApp(runtime: Runtime): express.Express {
           handlers.push([name, handler]);
           runtime.ctx.on(name, handler);
         };
+
+        // 文本增量：直接写 `0:` 文本帧，前端据此逐字渲染。
+        // 注意这里**不经过** writeData（data 帧），因为 useChat/我们的解析器
+        // 把 `0:` 当作正文流，才是打字机效果的正确通道。
+        const onDelta = (payload: any) => {
+          if (!payload?.runId) return;
+          if (runId === undefined) runId = payload.runId;
+          if (payload.runId !== runId) return;
+          if (typeof payload.delta === "string" && payload.delta.length > 0) {
+            sawDelta = true;
+            writer.write(`0:${JSON.stringify(payload.delta)}\n`);
+          }
+        };
+        handlers.push([AGENT_STREAM_DELTA, onDelta]);
+        runtime.ctx.on(AGENT_STREAM_DELTA, onDelta);
 
         track(AGENT_THINKING, (p) => ({
           type: "thinking",
@@ -204,14 +279,14 @@ export function createApp(runtime: Runtime): express.Express {
         try {
           const result = await runtime.agent.run(session, message);
 
-          // 正文文本：AgentLoop 是「跑完再返回」的，因此这里一次性写入最终回答。
-          // 工具调用过程已通过上面的 data 帧实时送达前端。
-          const finalText =
-            result.text && result.text.length > 0
-              ? result.text
-              : lastAssistantText(session);
-          if (finalText.length > 0) {
-            writer.write(`0:${JSON.stringify(finalText)}\n`);
+          // 正文已通过 agent:stream_delta 逐段写入，这里不再重复推送。
+          // 若模型未走流式（例如 Provider 不支持），回退为一次性写入，避免空回复。
+          if (!sawDelta) {
+            const fallback =
+              result.text && result.text.length > 0 ? result.text : lastAssistantText(session);
+            if (fallback.length > 0) {
+              writer.write(`0:${JSON.stringify(fallback)}\n`);
+            }
           }
 
           writer.writeData({
@@ -322,7 +397,9 @@ export async function startServer(
   options: ServerOptions = {},
 ): Promise<number> {
   const port = options.port ?? 3000;
-  const host = options.host ?? "127.0.0.1";
+  // 监听 0.0.0.0：允许局域网内其它设备（手机/平板）访问开发服务。
+  // 仅本机使用时可用 HOST=127.0.0.1 收窄。
+  const host = options.host ?? process.env.HOST ?? "0.0.0.0";
 
   const app = createApp(runtime);
 
@@ -330,10 +407,38 @@ export async function startServer(
     const server = app.listen(port, host, () => {
       const address = server.address();
       const actualPort = typeof address === "object" && address ? address.port : port;
-      console.log(`lish web 后端已启动：http://${host}:${actualPort}`);
-      console.log(`  模型：${runtime.config.model}`);
-      console.log(`  工作区：${runtime.config.workspaceRoot}`);
-      console.log("  前端开发服务器：http://localhost:5173");
+
+      const isWildcard = host === "0.0.0.0" || host === "::";
+      const shownHost = isWildcard ? "localhost" : host;
+
+      console.log("");
+      console.log(`  lish web 已启动`);
+      console.log(`  本机访问:   http://${shownHost}:${actualPort}`);
+      console.log(`  健康检查:   http://${shownHost}:${actualPort}/api/health`);
+      console.log(`  模型:       ${runtime.config.model}`);
+
+      if (isWildcard) {
+        const nets = networkInterfaces();
+        const lanUrls: string[] = [];
+        for (const [, addrs] of Object.entries(nets)) {
+          for (const addr of addrs ?? []) {
+            if (addr.family === "IPv4" && !addr.internal) {
+              lanUrls.push(`http://${addr.address}:${actualPort}`);
+            }
+          }
+        }
+        if (lanUrls.length > 0) {
+          console.log(`  局域网访问: ${lanUrls.join("  ")}`);
+        }
+      } else {
+        console.log(`  监听地址:   ${host}:${actualPort}`);
+      }
+
+      const webRoot = resolveWebRoot();
+      console.log(`  静态资源:   ${webRoot ?? "(未找到 web/dist，请先 npm run build)"}`);
+      console.log("");
+      console.log("  按 Ctrl+C 停止");
+      console.log("");
     });
 
     server.on("error", (err) => {
