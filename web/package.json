@@ -1,32 +1,52 @@
 {
-  "name": "web",
-  "private": true,
-  "version": "0.0.0",
+  "name": "dsh-transition-webui",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness 过渡版 Web UI — 像素级复刻原版界面，降低用户迁移到其他 agent 体系的认知成本，并可作为快速搭建自有 agent 界面的脚手架 demo",
   "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/drscrewdriver/dsh-transition-webui.git"
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/main.js",
+      "types": "./dist/main.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
-    "lint": "oxlint",
-    "preview": "vite preview"
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "lint": "eslint src",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
-    "@ai-sdk/react": "^1.2.12",
-    "@assistant-ui/react": "^0.15.31",
-    "@assistant-ui/react-markdown": "^0.14.24",
-    "ai": "^4.3.19",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
   },
   "devDependencies": {
-    "@types/node": "^24.19.2",
-    "@types/react": "^19.3.0",
-    "@types/react-dom": "^19.3.0",
-    "@vitejs/plugin-react": "^6.1.2",
-    "autoprefixer": "^10.6.1",
-    "oxlint": "^1.88.0",
-    "postcss": "^8.5.31",
-    "tailwindcss": "^3.4.19",
-    "typescript": "~6.0.3",
-    "vite": "^8.3.4"
+    "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.6",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "@vitejs/plugin-react": "^4.0.0",
+    "eslint": "^10.9.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "global-jsdom": "^29.0.0",
+    "jsdom": "^29.1.1",
+    "typescript": "^5.4.0",
+    "typescript-eslint": "^8.68.0",
+    "vite": "^6.0.0",
+    "vitest": "^4.1.11"
   }
 }

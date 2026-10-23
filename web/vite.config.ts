@@ -1,20 +1,36 @@
-import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import { resolve } from 'node:path'
 
-// https://vite.dev/config/
 export default defineConfig({
   plugins: [react()],
+  resolve: {
+    alias: {
+      '@': resolve(__dirname, 'src'),
+    },
+  },
+  build: {
+    sourcemap: true,
+    rollupOptions: {
+      output: {
+        // Separate vendor chunk for React to allow caching
+        manualChunks: {
+          vendor: ['react', 'react-dom'],
+        },
+      },
+    },
+  },
   server: {
-    // 显式绑定 127.0.0.1：Vite 默认可能只监听 IPv6 ::1，
-    // 导致用 127.0.0.1 访问时连接被拒绝。
-    host: "127.0.0.1",
+    // 与后端 CORS 白名单保持一致；显式绑 IPv4 避免只监听 ::1
+    host: '127.0.0.1',
     port: 5173,
+    strictPort: true,
     proxy: {
-      // 把 /api 转发到后端，避免开发期跨域；SSE 需要禁用缓冲。
-      "/api": {
-        target: "http://localhost:3000",
+      // 开发期也可走同源代理，避免浏览器跨域限制
+      '/api': {
+        target: 'http://127.0.0.1:3000',
         changeOrigin: true,
       },
     },
   },
-});
+})

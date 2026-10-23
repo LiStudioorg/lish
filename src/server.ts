@@ -65,7 +65,31 @@ export interface ToolStreamEvent {
 export function createApp(runtime: Runtime): express.Express {
   const app = express();
 
-  app.use(cors());
+  // CORS：显式允许 Vite 开发服务器。
+  // 开发期也可能用到 3081（上游复刻项目的默认端口）与 127.0.0.1 变体。
+  const allowedOrigins = new Set([
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:3081",
+    "http://127.0.0.1:3081",
+  ]);
+  app.use(
+    cors({
+      origin(origin, callback) {
+        // 无 Origin（同源请求、curl、健康检查）直接放行
+        if (!origin || allowedOrigins.has(origin)) {
+          callback(null, true);
+          return;
+        }
+        // 其余来源一律拒绝，避免任意站点驱动本机的文件读写工具。
+        // 传 null + false 让 cors 中间件直接不发 CORS 头（浏览器即拦截），
+        // 而不是抛错——抛错会被 express 当成 500，掩盖真实语义。
+        callback(null, false);
+      },
+      methods: ["GET", "POST", "OPTIONS"],
+      credentials: false,
+    }),
+  );
   app.use(express.json({ limit: "1mb" }));
 
   if (existsSync(publicDir)) {
