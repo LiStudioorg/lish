@@ -197,7 +197,70 @@ export async function checkHealth(): Promise<{
   }
 }
 
+// --- 配置管理（GET/POST /api/config）--------------------------------------
+
+/** 服务端下发的配置视图（apiKey 已脱敏）。 */
+export interface ServerConfig {
+  baseURL: string
+  model: string
+  maxSteps: number
+  workspaceRoot: string
+  /** 脱敏后的密钥，如 `sk-…abcd`；未配置为空串。 */
+  apiKeyMasked: string
+  hasApiKey: boolean
+  providerName: string
+  tools: string[]
+}
+
+/** 读取服务端当前配置。 */
+export async function fetchConfig(): Promise<ServerConfig | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/config`)
+    if (!res.ok) return null
+    return (await res.json()) as ServerConfig
+  } catch {
+    return null
+  }
+}
+
+export interface ConfigPatch {
+  apiKey?: string
+  baseURL?: string
+  model?: string
+  maxSteps?: number
+}
+
+/**
+ * 提交配置变更（热生效，无需重启服务）。
+ *
+ * apiKey 留空表示「不修改」——前端永远不回写脱敏值，
+ * 否则会把真实密钥覆盖成一串 `sk-…abcd`。
+ */
+export async function updateConfig(
+  patch: ConfigPatch,
+): Promise<{ ok: boolean; error?: string; config?: ServerConfig }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/config`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean
+      error?: string
+      config?: ServerConfig
+    }
+    if (!res.ok) {
+      return { ok: false, error: data.error ?? `HTTP ${res.status}` }
+    }
+    return { ok: true, config: data.config }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
 /** 供 UI 判断后端是否可达。 */
+
 export function isStoreReady(): boolean {
   return typeof store.addMessage === 'function'
 }

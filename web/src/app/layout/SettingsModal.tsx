@@ -7,9 +7,10 @@
  * - Auto-scroll toggle
  */
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Button } from '../../components/Button.tsx'
 import { store, type Settings } from '../../store.ts'
+import { fetchConfig, updateConfig, type ServerConfig } from '../../chat/api.ts'
 
 interface SettingsModalProps {
   onClose: () => void
@@ -17,6 +18,48 @@ interface SettingsModalProps {
 
 export function SettingsModal({ onClose }: SettingsModalProps) {
   const settings = store.settings
+
+  /** 服务端当前配置（含脱敏密钥），用于显示真实生效状态。 */
+  const [server, setServer] = useState<ServerConfig | null>(null)
+  const [saving, setSaving] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+
+  // 打开面板时拉取服务端配置，避免界面显示与真实生效值不一致
+  useEffect(() => {
+    let alive = true
+    void fetchConfig().then(cfg => {
+      if (!alive || !cfg) return
+      setServer(cfg)
+      // 用服务端值回填（密钥除外），这样用户看到的就是真实配置
+      store.updateSetting('model', cfg.model)
+      store.updateSetting('baseURL', cfg.baseURL)
+      store.updateSetting('maxSteps', cfg.maxSteps)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
+  /** 保存到服务端（热生效）。apiKey 为空时不提交，避免覆盖真实密钥。 */
+  async function handleSave() {
+    setSaving(true)
+    setMessage(null)
+    const result = await updateConfig({
+      model: settings.model,
+      baseURL: settings.baseURL,
+      maxSteps: settings.maxSteps,
+      ...(settings.apiKey.trim().length > 0 ? { apiKey: settings.apiKey.trim() } : {}),
+    })
+    setSaving(false)
+    if (result.ok) {
+      if (result.config) setServer(prev => (prev ? { ...prev, ...result.config } : prev))
+      // 提交成功后清空输入框里的明文密钥
+      store.updateSetting('apiKey', '')
+      setMessage({ kind: 'ok', text: '已保存并生效' })
+    } else {
+      setMessage({ kind: 'err', text: result.error ?? '保存失败' })
+    }
+  }
 
   useEffect(() => {
     // Keep dark mode attribute in sync with settings
@@ -31,12 +74,16 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
     store.updateSetting('darkMode', !settings.darkMode)
   }
 
-  function handleModelChange(e: React.ChangeEvent<HTMLSelectElement>) {
+  function handleModelChange(e: React.ChangeEvent<HTMLInputElement>) {
     store.updateSetting('model', e.target.value)
   }
 
-  function handleApiEndpointChange(e: React.ChangeEvent<HTMLInputElement>) {
-    store.updateSetting('apiEndpoint', e.target.value)
+  function handleBaseURLChange(e: React.ChangeEvent<HTMLInputElement>) {
+    store.updateSetting('baseURL', e.target.value)
+  }
+
+  function handleApiKeyChange(e: React.ChangeEvent<HTMLInputElement>) {
+    store.updateSetting('apiKey', e.target.value)
   }
 
   function handleFontSizeChange(e: React.ChangeEvent<HTMLSelectElement>) {
@@ -79,15 +126,14 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             
             <div className="dsh-modal-field">
               <label className="dsh-modal-label">模型</label>
-              <select
-                className="dsh-modal-select"
+              <input
+                type="text"
+                className="dsh-modal-input"
                 value={settings.model}
                 onChange={handleModelChange}
-              >
-                <option value="deepseek-chat">deepseek-chat</option>
-                <option value="deepseek-reasoner">deepseek-reasoner</option>
-                <option value="deepseek-coder">deepseek-coder</option>
-              </select>
+                placeholder="deepseek-chat"
+                spellCheck={false}
+              />
             </div>
           </section>
 
@@ -96,15 +142,59 @@ export function SettingsModal({ onClose }: SettingsModalProps) {
             <h3 className="dsh-modal-section-title">API 配置</h3>
             
             <div className="dsh-modal-field">
-              <label className="dsh-modal-label">API 端点</label>
+              <label className="dsh-modal-label">Base URL</label>
               <input
                 type="text"
                 className="dsh-modal-input"
-                value={settings.apiEndpoint}
-                onChange={handleApiEndpointChange}
-                placeholder="http://localhost:3080/api"
+                value={settings.baseURL}
+                onChange={handleBaseURLChange}
+                placeholder="https://api.deepseek.com"
+                spellCheck={false}
               />
             </div>
+
+            <div className="dsh-modal-field">
+              <label className="dsh-modal-label">API Key</label>
+              <input
+                type="password"
+                className="dsh-modal-input"
+                value={settings.apiKey}
+                onChange={handleApiKeyChange}
+                placeholder={server?.hasApiKey ? `已配置：${server.apiKeyMasked}（留空则不修改）` : '未配置，请输入 sk-...'}
+                autoComplete="off"
+                spellCheck={false}
+              />
+            </div>
+
+            <div className="dsh-modal-field">
+              <label className="dsh-modal-label">最大步数</label>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                className="dsh-modal-input"
+                value={settings.maxSteps}
+                onChange={e => store.updateSetting('maxSteps', Number(e.target.value))}
+              />
+            </div>
+
+            <div className="dsh-modal-row">
+              <span className="dsh-modal-row-label">
+                当前 Provider：{server?.providerName ?? '未知'}
+              </span>
+              <Button variant="primary" size="sm" onClick={() => void handleSave()} disabled={saving}>
+                {saving ? '保存中…' : '保存'}
+              </Button>
+            </div>
+
+            {message ? (
+              <p
+                className="dsh-modal-hint"
+                style={{ color: message.kind === 'ok' ? '#4ade80' : '#f87171' }}
+              >
+                {message.text}
+              </p>
+            ) : null}
           </section>
 
           {/* ── Display ── */}

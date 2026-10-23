@@ -30,7 +30,8 @@ import {
   AGENT_TOOL_CALL,
   AGENT_TOOL_RESULT,
 } from "./core/agent-loop.js";
-import type { Runtime } from "./runtime.js";
+import type { Runtime, LlmConfigPatch, PublicConfig } from "./runtime.js";
+import { maskApiKey } from "./runtime.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -172,6 +173,76 @@ export function createApp(runtime: Runtime): express.Express {
       workspace: runtime.config.workspaceRoot,
       sessions: runtime.sessions.size,
       tools: runtime.tools.list(),
+    });
+  });
+
+  /**
+   * 读取当前 LLM 配置。
+   * API Key 一律脱敏后返回——前端只需要知道「有没有配」，
+   * 绝不下发完整密钥（避免出现在浏览器历史、日志、截图中）。
+   */
+  app.get("/api/config", (_req, res) => {
+    const cfg = runtime.config;
+    const view: PublicConfig = {
+      baseURL: cfg.baseURL,
+      model: cfg.model,
+      maxSteps: cfg.maxSteps,
+      workspaceRoot: cfg.workspaceRoot,
+      apiKeyMasked: maskApiKey(cfg.apiKey),
+      hasApiKey: cfg.apiKey.length > 0,
+      providerName: runtime.llm.providerName ?? "none",
+      tools: runtime.tools.list(),
+    };
+    res.json(view);
+  });
+
+  /**
+   * 更新 LLM 配置（热生效，无需重启）。
+   *
+   * 安全约束：
+   *   - 只接受白名单字段，未知字段忽略；
+   *   - apiKey 传空串表示「不修改」，避免前端把脱敏值回写导致密钥被覆盖；
+   *   - 请求体大小已由 express.json 限制。
+   */
+  app.post("/api/config", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+
+    const patch: LlmConfigPatch = {};
+    if (typeof body.apiKey === "string" && body.apiKey.trim().length > 0) {
+      patch.apiKey = body.apiKey.trim();
+    }
+    if (typeof body.baseURL === "string") patch.baseURL = body.baseURL;
+    if (typeof body.model === "string") patch.model = body.model;
+    if (typeof body.maxSteps === "number") patch.maxSteps = body.maxSteps;
+
+    if (Object.keys(patch).length === 0) {
+      res.status(400).json({ error: "没有可更新的字段（apiKey / baseURL / model / maxSteps）" });
+      return;
+    }
+
+    try {
+      runtime.updateLlmConfig(patch);
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    const cfg = runtime.config;
+    console.log(
+      `  配置已更新: model=${cfg.model} baseURL=${cfg.baseURL} key=${maskApiKey(cfg.apiKey) || "(未设置)"}`,
+    );
+    res.json({
+      ok: true,
+      config: {
+        baseURL: cfg.baseURL,
+        model: cfg.model,
+        maxSteps: cfg.maxSteps,
+        apiKeyMasked: maskApiKey(cfg.apiKey),
+        hasApiKey: cfg.apiKey.length > 0,
+        providerName: runtime.llm.providerName ?? "none",
+      } satisfies Partial<PublicConfig>,
     });
   });
 

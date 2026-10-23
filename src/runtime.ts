@@ -98,8 +98,46 @@ export interface Runtime {
   tools: ToolRegistry;
   agent: AgentLoop;
   config: RuntimeConfig;
+  /**
+   * 热更新 LLM 配置（API Key / Base URL / Model）。
+   *
+   * 重建一个 OpenAIProvider 并交给 LlmRuntime.setProvider 替换——
+   * 这正是 LlmRuntime 热切换能力的设计用途，无需重启进程。
+   * 返回更新后的配置快照。
+   */
+  updateLlmConfig(patch: LlmConfigPatch): RuntimeConfig;
   /** 拆除运行时：冲洗会话日志并销毁内核。 */
   shutdown(): Promise<void>;
+}
+
+/** 可由设置面板修改的字段。 */
+export interface LlmConfigPatch {
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+  maxSteps?: number;
+}
+
+/** 对外暴露的配置视图（apiKey 脱敏）。 */
+export interface PublicConfig {
+  baseURL: string;
+  model: string;
+  maxSteps: number;
+  workspaceRoot: string;
+  /** 已脱敏的密钥，例如 `sk-…abcd`；未配置时为空串。 */
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  /** 当前 Provider 名称（如 openai / mock）。 */
+  providerName: string;
+  /** 前端不应拿到完整密钥。 */
+  tools: string[];
+}
+
+/** 脱敏 API Key：仅保留前 3 位与后 4 位。 */
+export function maskApiKey(key: string): string {
+  if (!key) return "";
+  if (key.length <= 8) return "*".repeat(key.length);
+  return `${key.slice(0, 3)}…${key.slice(-4)}`;
 }
 
 /** 装配一个完整的运行时。 */
@@ -144,13 +182,52 @@ export function createRuntime(config: RuntimeConfig): Runtime {
   const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps });
   ctx.provide(AgentLoop.KEY, agent);
 
+  // 可变配置：设置面板通过 updateLlmConfig 热更新
+  let currentConfig: RuntimeConfig = { ...config };
+
+  const updateLlmConfig = (patch: LlmConfigPatch): RuntimeConfig => {
+    const next: RuntimeConfig = {
+      ...currentConfig,
+      ...(patch.baseURL !== undefined && patch.baseURL.trim().length > 0
+        ? { baseURL: patch.baseURL.trim() }
+        : {}),
+      ...(patch.model !== undefined && patch.model.trim().length > 0
+        ? { model: patch.model.trim() }
+        : {}),
+      ...(patch.apiKey !== undefined && patch.apiKey.trim().length > 0
+        ? { apiKey: patch.apiKey.trim() }
+        : {}),
+      ...(patch.maxSteps !== undefined && Number.isFinite(patch.maxSteps)
+        ? { maxSteps: Math.max(1, Math.floor(patch.maxSteps)) }
+        : {}),
+    };
+
+    currentConfig = next;
+
+    // 若是 Mock 模式，保持 Mock，不因设置面板改动而切到真实网络。
+    if (!(currentConfig.provider && currentConfig.provider.name === "mock")) {
+      llm.setProvider(
+        new OpenAIProvider({
+          apiKey: next.apiKey,
+          baseURL: next.baseURL,
+          model: next.model,
+        }),
+      );
+    }
+    return currentConfig;
+  };
+
   return {
     ctx,
     sessions,
     llm,
     tools,
     agent,
-    config,
+    // 用 getter 保证外部读到的是最新配置（设置面板热更新后仍准确）
+    get config() {
+      return currentConfig;
+    },
+    updateLlmConfig,
     async shutdown() {
       try {
         await sessions.flushAll();

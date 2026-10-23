@@ -40,6 +40,17 @@ export interface Settings {
   apiEndpoint: string
   autoScroll: boolean
   fontSize: 'small' | 'medium' | 'large'
+  /** 后端 LLM 端点（Base URL）。空串表示使用服务端默认值。 */
+  baseURL: string
+  /**
+   * API Key。
+   *
+   * 注意：只保存在内存、只用于 POST /api/config，
+   * 从不回显到界面（界面显示的是服务端返回的脱敏值）。
+   */
+  apiKey: string
+  /** 单轮 Agent 循环最大步数。 */
+  maxSteps: number
 }
 
 export interface AppState {
@@ -105,6 +116,9 @@ const defaultSettings: Settings = {
   apiEndpoint: '/api',
   autoScroll: true,
   fontSize: 'medium',
+  baseURL: '',
+  apiKey: '',
+  maxSteps: 8,
 }
 
 /* ── Store implementation ── */
