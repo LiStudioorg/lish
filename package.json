@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:kernel": "node --no-warnings --loader ts-node/esm src/kernel/test.ts"
+    "test:kernel": "node --no-warnings --loader ts-node/esm src/kernel/test.ts",
+    "test:events": "node --no-warnings --loader ts-node/esm src/kernel/test-events.ts"
   },
   "repository": {
     "type": "git",
