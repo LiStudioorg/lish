@@ -89,6 +89,22 @@ export interface SessionOptions {
   now?: () => number;
   /** Whether to record the `session.created` event. Defaults to true. */
   emitCreated?: boolean;
+  /**
+   * Strict log parsing. When true, a malformed / truncated JSONL line makes
+   * `Session.load` throw instead of being skipped. Defaults to false so a
+   * crashed process can still be recovered.
+   */
+  strict?: boolean;
+}
+
+/** Options for the `deriveMessages` projection. */
+export interface DeriveOptions {
+  /**
+   * Merge every system message into a single leading message. Real provider
+   * APIs generally accept one system prompt, first in the list. Defaults to
+   * false (system messages stay in log order).
+   */
+  hoistSystem?: boolean;
 }
 
 // --- Session --------------------------------------------------------------
@@ -96,6 +112,8 @@ export interface SessionOptions {
 export class Session {
   readonly id: string;
   readonly title?: string;
+  /** Whether malformed log lines are fatal on load. */
+  readonly strict: boolean;
 
   private readonly events: AnySessionEvent[] = [];
   private readonly file?: string;
@@ -109,6 +127,7 @@ export class Session {
     this.title = options.title;
     this.file = options.file;
     this.now = options.now ?? (() => Date.now());
+    this.strict = options.strict ?? false;
 
     if (options.emitCreated !== false) {
       this.append({ type: "session.created", sessionId: this.id, ...(this.title !== undefined ? { title: this.title } : {}) });
@@ -196,14 +215,24 @@ export class Session {
    *   - `tool.result` becomes a `tool` message referencing its call id;
    *   - every other event type is ignored.
    *
-   * Consecutive system messages are preserved (the caller may hoist them).
+   * With `{ hoistSystem: true }` every system message is merged into one
+   * leading message (see `hoistSystemPrompt`).
    */
-  deriveMessages(): Message[] {
-    return this.events.reduce<Message[]>((messages, event) => {
+  deriveMessages(options: DeriveOptions = {}): Message[] {
+    const messages = this.events.reduce<Message[]>((acc, event) => {
       const projected = projectEvent(event);
-      if (projected) messages.push(projected);
-      return messages;
+      if (projected) acc.push(projected);
+      return acc;
     }, []);
+    return options.hoistSystem ? hoistSystemPrompt(messages) : messages;
+  }
+
+  /**
+   * Fold the log with system messages merged into a single leading message.
+   * Convenience equivalent of `deriveMessages({ hoistSystem: true })`.
+   */
+  deriveApiMessages(): Message[] {
+    return this.deriveMessages({ hoistSystem: true });
   }
 
   // --- Persistence --------------------------------------------------------
@@ -225,7 +254,7 @@ export class Session {
    */
   static async load(file: string, options: Omit<SessionOptions, "file"> = {}): Promise<Session> {
     const content = await readFile(file, "utf8");
-    const rawEvents = parseJsonl(content);
+    const rawEvents = parseJsonl(content, { strict: options.strict, file });
 
     // The log is the source of truth: recover identity from `session.created`
     // rather than minting a fresh id on every load. Explicit options win.
@@ -331,20 +360,71 @@ function readSessionMeta(rawEvents: unknown[]): {
   return {};
 }
 
-function parseJsonl(content: string): unknown[] {
+export class SessionCorruptLogError extends Error {
+  constructor(
+    public readonly file: string,
+    public readonly line: number,
+    public readonly cause: unknown,
+  ) {
+    super(
+      `Corrupt JSONL in "${file}" at line ${line}: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = "SessionCorruptLogError";
+  }
+}
+
+function parseJsonl(
+  content: string,
+  options: { strict?: boolean; file?: string } = {},
+): unknown[] {
   const out: unknown[] = [];
-  for (const line of content.split("\n")) {
-    const trimmed = line.trim();
+  const lines = content.split("\n");
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = (lines[i] as string).trim();
     if (trimmed.length === 0) continue;
     try {
       out.push(JSON.parse(trimmed));
-    } catch {
-      // A torn final line (crash mid-write) is skipped rather than fatal:
-      // the rest of the durable log is still recoverable.
+    } catch (err) {
+      if (options.strict) {
+        throw new SessionCorruptLogError(
+          options.file ?? "<memory>",
+          i + 1,
+          err,
+        );
+      }
+      // Non-strict: a torn final line (crash mid-write) is skipped rather
+      // than fatal, so the rest of the durable log stays recoverable.
       continue;
     }
   }
   return out;
+}
+
+/**
+ * Merge all system messages into one leading message.
+ *
+ * Provider APIs generally accept a single system prompt, placed first. This
+ * preserves every system message's text (joined with a blank line) instead of
+ * dropping later ones, which would silently lose instructions.
+ */
+export function hoistSystemPrompt(messages: Message[]): Message[] {
+  const systemParts: string[] = [];
+  const rest: Message[] = [];
+
+  for (const message of messages) {
+    if (message.role === "system") {
+      const text = message.content ?? "";
+      if (text.length > 0) systemParts.push(text);
+    } else {
+      rest.push(message);
+    }
+  }
+
+  if (systemParts.length === 0) return rest;
+  return [{ role: "system", content: systemParts.join("\n\n") }, ...rest];
 }
 
 let idCounter = 0;
