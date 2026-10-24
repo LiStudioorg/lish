@@ -4,7 +4,7 @@
 > 违反任一条的改动一律重写，不得以"后续再补"为由合入。
 
 适用范围：`src/`（后端内核）、`web/`（前端）、`scripts/`、`examples/`。
-目标定位：对标 DeepSeek Harness 的核心基础设施。
+目标定位：生产级、可审计的智能体核心基础设施。
 
 ---
 
@@ -83,22 +83,24 @@
 
 | 条目 | 状态 | 说明 |
 | --- | --- | --- |
-| 1 微内核开闭原则 | ✅ | 插件系统已落地（Patch + Loader + HMR） |
-| 1 热插拔 100% 回收 | ✅ | `Context.scope()` 实现逆序回滚，有测试覆盖 |
-| 2 后端异常边界 | ⚠️ 部分 | 工具执行有 try/catch，路由缺统一 error middleware |
-| 2 前端 Error Boundary | ❌ 未实现 | 需新增 |
-| 2 工具调用幂等 | ❌ 未实现 | 需按 toolCallId 去重 |
-| 2 Retry / 熔断 | ❌ 未实现 | 仅有超时 |
-| 3 XSS 净化 | ❌ 未实现 | 当前用纯文本渲染，接入 Markdown 前必须先做净化 |
-| 3 路径双重校验 | ✅ | `resolve` + `realpath` 已实现，有符号链接测试 |
-| 3 密钥脱敏 | ✅ | `maskApiKey` 已实现，接口不下发明文 |
-| 4 SSE 防全局重渲染 | ⚠️ 部分 | 已做 16ms 合帧，但仍走整树 setState |
-| 4 列表虚拟化 | ❌ 未实现 | 轨迹面板必须使用 |
+| 1 微内核开闭原则 | ✅ | 插件系统（Patch + Loader + HMR + 目录扫描） |
+| 1 热插拔 100% 回收 | ✅ | `Context.scope()` 逆序回滚，有测试覆盖 |
+| 2 后端异常边界 | ⚠️ 部分 | 工具/插件有边界；路由缺统一 error middleware |
+| 2 前端 Error Boundary | ✅ | `web/src/ui/ErrorBoundary.tsx`，逐 Tab 包裹 |
+| 2 工具调用幂等 | ❌ 未实现 | 写操作尚未按 toolCallId 去重 |
+| 2 Retry / 熔断 | ⚠️ 部分 | 有 Timeout 与 `retryable` 标记；缺重试与熔断 |
+| 3 XSS 净化 | ⚠️ 部分 | 目前纯文本 + JSON 文本渲染，未使用 innerHTML；接 Markdown 前须净化 |
+| 3 路径双重校验 | ✅ | `resolve` + `realpath`，有符号链接测试 |
+| 3 密钥脱敏 | ✅ | `maskApiKey` + 前端 `maskSecrets` |
+| 4 SSE 防全局重渲染 | ⚠️ 部分 | 16ms 合帧 + memo 隔离；未引入 Zustand |
+| 4 列表虚拟化 | ✅ | 轨迹面板使用 `@tanstack/react-virtual` |
 | 4 骨架屏 / 按需加载 | ❌ 未实现 | |
-| 5 Trace ID / duration | ⚠️ 部分 | 有 `runId` 与 `duration`，缺 `traceId` 与 `tokenUsage` 落盘 |
+| 5 Trace ID / duration | ✅ | `traceId`、`timestamp`、`duration`、`tokenUsage` 全量落盘 |
+| 5 结构化日志 | ⚠️ 部分 | ErrorBoundary 与插件加载有 JSON 日志；路由层不完整 |
 | 6 严格模式 | ✅ | 前后端均开启 strict |
-| 6 禁止 any | ⚠️ 部分 | 存在少量 `any`（如事件载荷），需逐步收敛 |
-| 6 ESLint | ❌ 未配置 | 后端无 ESLint，前端有 Next 默认配置 |
+| 6 禁止 any | ✅ | ESLint `no-explicit-any` 强制执行；事件总线边界已精确豁免 |
+| 6 ESLint | ✅ | `eslint.config.mjs` + `npm run lint` |
+| 6 提交前三件套 | ✅ | `tsc --noEmit` / `npm test` / `npm run lint` 全部纳入 |
 
 > 该表在每次重大改动后更新，作为交付前的验收依据。
 

@@ -59,7 +59,7 @@ const INITIAL_TODOS: Todo[] = [
   { id: "t1", text: "接通 Web UI 与后端 SSE", done: true },
   { id: "t2", text: "实现 Token 级流式输出", done: true },
   { id: "t3", text: "补全设置弹窗与配置热更新", done: true },
-  { id: "t4", text: "对齐 DSH 三栏可拖拽布局", done: true },
+  { id: "t4", text: "三栏可拖拽布局", done: true },
   { id: "t5", text: "接入真实文件树与终端", done: true },
   { id: "t6", text: "接入多智能体与工具链", done: false },
 ];
