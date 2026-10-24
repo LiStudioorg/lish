@@ -301,9 +301,17 @@ export async function runTui(runtime: Runtime): Promise<number> {
   if (!process.stdin.isTTY) {
     console.error(
       "lish tui 需要在交互式终端中运行。\n" +
-        "在非 TTY 环境下请使用 `lish chat`（纯文本）或 `lish web`（浏览器界面）。",
+        "在非 TTY 环境下请使用 `lish web`（浏览器界面）。",
     );
     return 2;
+  }
+
+  // 没有 Key 也要能进 TUI —— 只是发消息时会提示去设置里补，
+  // 这里提前把话说清楚，避免用户敲完一大段才被拒。
+  if (!runtime.config.apiKey) {
+    console.error(
+      "⚠️ 未检测到 API Key，请在浏览器界面的【设置】中配置（或设置环境变量 LLM_API_KEY）。",
+    );
   }
 
   const app = render(<App runtime={runtime} />);

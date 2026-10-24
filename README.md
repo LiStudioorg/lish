@@ -26,7 +26,7 @@
 - [快速开始](#快速开始)
 - [命令参考](#命令参考)
 - [配置](#配置)
-- [HTTP API](#http-api)
+- [HTTP API](#http-api)（完整契约见 [`docs/API.md`](./docs/API.md)）
 - [插件开发](#插件开发)
 - [子智能体](#子智能体)
 - [可观测性](#可观测性)
@@ -87,7 +87,6 @@
 | --- | --- | --- |
 | Web UI | `lish web` | Next.js 静态导出，三栏可拖拽布局，支持移动端 |
 | TUI | `lish tui` | 基于 ink 的终端界面 |
-| CLI | `lish chat` | 极简文本对话，最小依赖，便于排障 |
 
 ---
 
@@ -259,13 +258,22 @@ curl http://localhost:3000/api/health   # 期望返回 {"ok":true,...}
 
 ## 快速开始
 
-### 1. 配置模型凭据
+### 1. 配置模型凭据（两种方式，任选其一）
+
+**方式 A：界面内配置（推荐）** —— 直接启动，然后在「设置 → 模型 → 添加提供商」中填写
+Base URL / API Key，点「获取可用模型」选择模型即可。配置保存在 `~/.lish/config.json`，
+下次启动自动生效。
+
+**方式 B：环境变量**
 
 ```bash
-export LLM_API_KEY="sk-..."                       # 必填
+export LLM_API_KEY="sk-..."                       # 可选
 export LLM_BASE_URL="https://api.deepseek.com"    # 可选，默认值
 export LLM_MODEL="deepseek-chat"                  # 可选，默认值
 ```
+
+> 优先级：环境变量 > `~/.lish/config.json` > 内置默认值。
+> **没有 Key 也能启动**，界面顶部会提示你去设置里补齐。
 
 ### 2. 启动
 
@@ -311,7 +319,6 @@ lish [命令] [选项]
 命令：
   web [options]   启动 Web 服务（默认命令）
   tui             启动终端 UI（ink）
-  chat            启动极简文本聊天
 
 web 选项：
   -p, --port <number>   监听端口（默认 3000）
@@ -329,7 +336,6 @@ web 选项：
 lish                              # 等价于 lish web
 lish web -p 8080 -H 127.0.0.1     # 仅本机访问的 8080 端口
 lish tui                          # 终端界面
-lish chat                         # 极简文本对话
 ```
 
 ---
@@ -340,7 +346,7 @@ lish chat                         # 极简文本对话
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `LLM_API_KEY` | 无（必填） | 模型 API 密钥 |
+| `LLM_API_KEY` | 无（可选） | 模型 API 密钥；缺省时读 `~/.lish/config.json` |
 | `LLM_BASE_URL` | `https://api.deepseek.com` | OpenAI 兼容接口地址 |
 | `LLM_MODEL` | `deepseek-chat` | 模型名称 |
 | `LLISH_MAX_STEPS` | `8` | 单轮 Agent 最大步数 |
@@ -348,6 +354,7 @@ lish chat                         # 极简文本对话
 | `LLISH_NO_PERSIST` | 未设置 | 设置后会话不落盘 |
 | `LLISH_PLUGINS_DIR` | `~/.lish/plugins` | 插件目录 |
 | `LISH_SETTINGS_FILE` | `~/.lish/settings.json` | 应用配置文件路径 |
+| `LISH_CONFIG_FILE` | `~/.lish/config.json` | 模型提供商配置文件路径 |
 | `LISH_LOAD_EXAMPLE_PLUGIN` | 未设置 | 设为 `1` 加载仓库内示例插件 |
 | `LLISH_DEBUG` | 未设置 | 设为 `1` 输出完整错误堆栈 |
 | `PORT` | `3000` | 默认端口（`--port` 优先） |
@@ -360,11 +367,28 @@ lish chat                         # 极简文本对话
 
 | 分类 | 可配置项 |
 | --- | --- |
-| 模型 | API Key、Base URL、模型名、最大步数 |
+| 模型提供商 | **可添加任意多个**（DeepSeek / OpenAI / Ollama / 中转网关…）：名称、Base URL、API Key、模型；一键「获取可用模型」；点击圆点切换启用 |
 | 通用 | 权限模式（工作区内 / 完全权限）、主题、字号 |
 | 内置插件 | 文件系统、终端执行、回显工具、会话日志 |
 | Agent 预设 | 标准 / 极简 / 创造 |
 | 插件管理 | 查看已加载插件、热重载 |
+
+> 运行时参数「最大步数」在「模型」页底部单独保存，不属于任何提供商。
+
+#### 配置优先级
+
+```
+环境变量 (LLM_API_KEY / LLM_BASE_URL / LLM_MODEL)
+        ↓ 覆盖
+~/.lish/config.json 中「当前激活的提供商」
+        ↓ 覆盖
+内置默认值 (https://api.deepseek.com · deepseek-chat · maxSteps 8)
+```
+
+环境变量为空串或纯空白时**不**遮蔽配置文件。配置文件权限固定 `0600`（含明文密钥）。
+
+> **无 Key 也能启动**：`lish web` / `lish tui` 在没有 API Key 时会打印警告并继续启动，
+> 前端在输入框上方显示红色横幅，引导用户到【设置】中补齐。
 
 > API Key 在接口返回中**永久脱敏**（形如 `sk-…abcd`），前端只显示脱敏值与是否已配置。
 
@@ -374,19 +398,30 @@ lish chat                         # 极简文本对话
 
 服务默认监听 `0.0.0.0:3000`。
 
+> **接口风格：RPC over HTTPS（全 POST）**。所有 `/api/*` 端点统一使用 `POST`，
+> 动作写在路径上、参数放在 JSON 请求体里；只有 `/` 静态页面走 `GET`。
+> 这与模型工具调用（工具名 + JSON 参数）的心智模型一致，也让网关只需放行一种方法。
+>
+> 完整字段、错误码、数据结构与兼容策略见 **[`docs/API.md`](./docs/API.md)**。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/health` | 健康检查，返回模型、工作区、工具列表 |
+| `POST` | `/api/health` | 健康检查，返回模型、工作区、工具列表 |
 | `POST` | `/api/chat` | 对话主接口，返回 SSE 流 |
-| `GET` | `/api/config` | 读取 LLM 与应用配置（密钥已脱敏） |
-| `POST` | `/api/config` | 更新配置（热生效） |
-| `GET` | `/api/files` | 工作区文件树（限深 3 层，忽略 node_modules 等） |
-| `GET` | `/api/files/content?path=` | 读取单个文件内容 |
+| `POST` | `/api/config/get` | 读取 LLM 与应用配置（密钥已脱敏） |
+| `POST` | `/api/config` | 更新配置（热生效并落盘） |
+| `POST` | `/api/providers/list` | 列出全部模型提供商（密钥已脱敏） |
+| `POST` | `/api/providers` | 新增 / 更新提供商（带 `id` 即更新） |
+| `POST` | `/api/providers/delete` | 删除提供商 |
+| `POST` | `/api/providers/activate` | 切换激活的提供商（热生效） |
+| `POST` | `/api/models` | 拉取上游可用模型列表（失败由前端降级为手填） |
+| `POST` | `/api/files` | 工作区文件树（限深 3 层，忽略 node_modules 等） |
+| `POST` | `/api/files/content` | 读取单个文件内容（body: `{ "path": "..." }`） |
 | `POST` | `/api/exec` | 执行 Shell 命令（5 秒超时） |
-| `GET` | `/api/session/:id/events` | 会话轨迹事件（含 traceId/耗时/token） |
-| `GET` | `/api/plugins` | 已加载插件列表 |
+| `POST` | `/api/session/events` | 会话轨迹事件（body: `{ "sessionId": "..." }`） |
+| `POST` | `/api/plugins` | 已加载插件列表 |
 | `POST` | `/api/plugins/reload` | 热重载插件（可指定 id） |
-| `GET` | `/api/subagents` | 子代理记录与运行中数量 |
+| `POST` | `/api/subagents` | 子代理记录与运行中数量 |
 
 ### SSE 协议说明
 
@@ -416,13 +451,18 @@ curl -N -X POST http://localhost:3000/api/chat \
   -H 'content-type: application/json' \
   -d '{"message":"读取 package.json 并告诉我项目名"}'
 
-# 更新模型配置
-curl -X POST http://localhost:3000/api/config \
+# 新增一个提供商
+curl -X POST http://localhost:3000/api/providers \
   -H 'content-type: application/json' \
-  -d '{"model":"deepseek-reasoner","apiKey":"sk-..."}'
+  -d '{"name":"DeepSeek","baseURL":"https://api.deepseek.com","apiKey":"sk-...","model":"deepseek-chat"}'
+
+# 拉取可用模型
+curl -X POST http://localhost:3000/api/models \
+  -H 'content-type: application/json' -d '{}'
 
 # 查看轨迹
-curl http://localhost:3000/api/session/<sessionId>/events
+curl -X POST http://localhost:3000/api/session/events \
+  -H 'content-type: application/json' -d '{"sessionId":"s_xxx"}'
 ```
 
 ---

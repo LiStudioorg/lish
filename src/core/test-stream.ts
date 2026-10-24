@@ -551,14 +551,18 @@ test("POST /api/chat 空消息返回 400", async () => {
   }
 });
 
-test("GET /api/health 返回模型与工具信息", async () => {
+test("POST /api/health 返回模型与工具信息", async () => {
   const runtime = await createRuntime(makeRuntime());
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
 
   try {
-    const res = await fetch(`http://127.0.0.1:${port}/api/health`);
+    const res = await fetch(`http://127.0.0.1:${port}/api/health`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     const body = await res.json();
     assert.equal(body.ok, true);
     assert.equal(body.model, "mock-model");

@@ -1,10 +1,26 @@
 /**
  * Web 服务（express）。
  *
- * 接口：
- *   POST /api/chat   接收用户消息，以 AI SDK 数据流协议流式返回
- *   GET  /api/health 健康检查
- *   GET  /           静态页面（旧版 public/index.html；新版前端见 web/）
+ * 接口约定：所有 `/api/*` 端点统一使用 **POST + JSON 请求体**（RPC 风格），
+ * 动作由路径表达、参数由 body 承载；只有 `/` 静态页面走 GET。
+ *
+ *   POST /api/chat            接收用户消息，以 AI SDK 数据流协议流式返回
+ *   POST /api/health          健康检查
+ *   POST /api/config/get      读取配置
+ *   POST /api/config          更新配置
+ *   POST /api/providers/list  列出提供商
+ *   POST /api/providers       新增 / 更新提供商
+ *   POST /api/providers/delete    删除提供商
+ *   POST /api/providers/activate  切换激活提供商
+ *   POST /api/models          拉取上游模型列表
+ *   POST /api/session/events  会话轨迹
+ *   POST /api/files           文件树
+ *   POST /api/files/content   读取文件
+ *   POST /api/exec            执行命令
+ *   POST /api/plugins         插件列表
+ *   POST /api/plugins/reload  热重载插件
+ *   POST /api/subagents       子智能体列表
+ *   GET  /                    静态页面（打包后的前端见 web/）
  *
  * 说明：
  *   后端依赖 Vercel AI SDK v4 的 `StreamData` / `toDataStreamResponse()`，
@@ -29,7 +45,12 @@ import {
   AGENT_TOOL_CALL,
   AGENT_TOOL_RESULT,
 } from "./core/agent-loop.js";
-import type { Runtime, LlmConfigPatch, PublicConfig } from "./runtime.js";
+import type {
+  Runtime,
+  LlmConfigPatch,
+  PublicConfig,
+  PublicProvider,
+} from "./runtime.js";
 import { maskApiKey } from "./runtime.js";
 import { readFileTree } from "./tools/file-tree.js";
 import { runShell } from "./tools/shell.js";
@@ -53,6 +74,53 @@ const here = dirname(fileURLToPath(import.meta.url));
  * 做法：从本文件所在目录逐级上溯，每级都检查 `web/out` 与 `web/dist`，
  * 命中第一个含 index.html 的目录即可。
  */
+/**
+ * 从上游 `/models` 响应中提取模型 id 列表。
+ *
+ * 兼容三种常见形态（OpenAI / DeepSeek / 部分兼容网关）：
+ *   1. `{ data: [{ id: "..." }] }`
+ *   2. `[{ id: "..." }]`
+ *   3. `{ models: [{ name: "..." }] }`（Ollama 风格）
+ * 任何无法识别的结构都返回空数组，由前端提示「获取失败，请手动输入模型名」。
+ */
+export function extractModelIds(payload: unknown): string[] {
+  const collect = (list: unknown): string[] => {
+    if (!Array.isArray(list)) return [];
+    const ids: string[] = [];
+    for (const item of list) {
+      if (typeof item === "string" && item.trim()) {
+        ids.push(item.trim());
+        continue;
+      }
+      if (item && typeof item === "object") {
+        const record = item as Record<string, unknown>;
+        for (const key of ["id", "name", "model"]) {
+          const value = record[key];
+          if (typeof value === "string" && value.trim()) {
+            ids.push(value.trim());
+            break;
+          }
+        }
+      }
+    }
+    return ids;
+  };
+
+  const fromObject = (value: unknown): string[] => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return collect(value);
+    }
+    const record = value as Record<string, unknown>;
+    for (const key of ["data", "models", "items"]) {
+      const ids = collect(record[key]);
+      if (ids.length > 0) return ids;
+    }
+    return [];
+  };
+
+  return [...new Set(fromObject(payload))].sort((a, b) => a.localeCompare(b));
+}
+
 export function resolveWebRoot(startDir: string = here): string | null {
   /*
    * 以 import.meta.url 为锚点逐级上溯。
@@ -220,7 +288,7 @@ export function createApp(runtime: Runtime): express.Express {
     });
   }
 
-  app.get("/api/health", (_req, res) => {
+  app.post("/api/health", (_req, res) => {
     res.json({
       ok: true,
       model: runtime.config.model,
@@ -235,7 +303,7 @@ export function createApp(runtime: Runtime): express.Express {
    *
    * 前端用它展示「子智能体 N 个」以及轨迹面板中的独立子代理分组。
    */
-  app.get("/api/subagents", (_req, res) => {
+  app.post("/api/subagents", (_req, res) => {
     try {
       const agents = runtime.listSubAgents();
       res.json({
@@ -258,10 +326,11 @@ export function createApp(runtime: Runtime): express.Express {
    * 返回完整事件数组，每条包含 traceId、毫秒时间戳、真实耗时与 tokenUsage，
    * 供前端轨迹面板渲染时间轴、条形图与详情。
    */
-  app.get("/api/session/:id/events", (req, res) => {
-    const sessionId = String(req.params.id ?? "");
+  app.post("/api/session/events", (req, res) => {
+    const sessionId =
+      typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : "";
     if (!sessionId) {
-      res.status(400).json({ ok: false, error: "缺少会话 id" });
+      res.status(400).json({ ok: false, error: "缺少 sessionId" });
       return;
     }
     try {
@@ -286,7 +355,7 @@ export function createApp(runtime: Runtime): express.Express {
    * 返回每个插件的 id、名称、版本、状态（loaded/disabled/error）
    * 以及加载耗时与错误信息，供设置面板展示。
    */
-  app.get("/api/plugins", (_req, res) => {
+  app.post("/api/plugins", (_req, res) => {
     try {
       res.json({ ok: true, plugins: runtime.listPlugins() });
     } catch (err) {
@@ -321,7 +390,7 @@ export function createApp(runtime: Runtime): express.Express {
    * 只读、限定 3 层深度、跳过 node_modules/.git 等重量级目录，
    * 因此在大仓库里也不会卡住。
    */
-  app.get("/api/files", async (_req, res) => {
+  app.post("/api/files", async (_req, res) => {
     try {
       const tree = await readFileTree(runtime.workspaceRoot, 3);
       res.json({ ok: true, root: runtime.workspaceRoot, tree });
@@ -338,8 +407,8 @@ export function createApp(runtime: Runtime): express.Express {
    *
    * 复用文件系统工具的权限判定：workspace 模式下禁止越界读取。
    */
-  app.get("/api/files/content", async (req, res) => {
-    const rel = typeof req.query.path === "string" ? req.query.path : "";
+  app.post("/api/files/content", async (req, res) => {
+    const rel = typeof req.body?.path === "string" ? req.body.path : "";
     if (!rel) {
       res.status(400).json({ ok: false, error: "缺少 path 参数" });
       return;
@@ -397,7 +466,134 @@ export function createApp(runtime: Runtime): express.Express {
    * API Key 一律脱敏后返回——前端只需要知道「有没有配」，
    * 绝不下发完整密钥（避免出现在浏览器历史、日志、截图中）。
    */
-  app.get("/api/config", (_req, res) => {
+  /** 把运行时里的提供商列表脱敏成可下发视图。 */
+  const publicProviders = (): PublicProvider[] =>
+    runtime.listProviders().map((p) => ({
+      id: p.id,
+      name: p.name,
+      baseURL: p.baseURL,
+      model: p.model,
+      apiKeyMasked: maskApiKey(p.apiKey),
+      hasApiKey: p.apiKey.length > 0,
+    }));
+
+  /**
+   * 列出全部模型提供商（密钥已脱敏）。
+   *
+   * 与 `POST /api/config/get` 的 `providers` 字段同源，单独提供是为了让
+   * 设置面板可以只刷新提供商列表而不重取整份配置。
+   */
+  app.post("/api/providers/list", (_req, res) => {
+    res.json({
+      ok: true,
+      providers: publicProviders(),
+      activeProviderId: runtime.activeProviderId(),
+    });
+  });
+
+  /**
+   * 新增或更新一个模型提供商。
+   *
+   * 幂等约定：带 `id` 即更新该条（`apiKey` 为空表示不修改密钥）；
+   * 不带 `id` 即新建。返回全量脱敏列表，前端直接整体替换，避免状态漂移。
+   */
+  app.post("/api/providers", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const str = (key: string): string | undefined =>
+      typeof body[key] === "string" ? (body[key] as string) : undefined;
+
+    const baseURL = str("baseURL")?.trim();
+    if (baseURL !== undefined && baseURL.length > 0 && !/^https?:\/\//i.test(baseURL)) {
+      res.status(400).json({ error: `baseURL 必须是 http(s) 地址：${baseURL}` });
+      return;
+    }
+
+    try {
+      await runtime.upsertProvider({
+        id: str("id"),
+        name: str("name"),
+        baseURL,
+        model: str("model"),
+        apiKey: str("apiKey"),
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      providers: publicProviders(),
+      activeProviderId: runtime.activeProviderId(),
+      config: {
+        baseURL: runtime.config.baseURL,
+        model: runtime.config.model,
+        apiKeyMasked: maskApiKey(runtime.config.apiKey),
+        hasApiKey: runtime.config.apiKey.length > 0,
+        providerName: runtime.llm.providerName ?? "none",
+      },
+    });
+  });
+
+  /**
+   * 删除一个提供商。
+   *
+   * 删掉激活项时自动回落到列表第一条；删除不存在的 id 视为幂等成功。
+   * 写操作统一走 POST（本项目只保留 GET=查询 / POST=写入 两类语义）。
+   */
+  app.post("/api/providers/delete", async (req: Request, res: Response) => {
+    const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+    if (!id) {
+      res.status(400).json({ ok: false, error: "缺少 id" });
+      return;
+    }
+    await runtime.removeProvider(id);
+    res.json({
+      ok: true,
+      providers: publicProviders(),
+      activeProviderId: runtime.activeProviderId(),
+      config: {
+        baseURL: runtime.config.baseURL,
+        model: runtime.config.model,
+        apiKeyMasked: maskApiKey(runtime.config.apiKey),
+        hasApiKey: runtime.config.apiKey.length > 0,
+        providerName: runtime.llm.providerName ?? "none",
+      },
+    });
+  });
+
+  /** 切换激活的提供商，立即热生效（无需重启）。 */
+  app.post("/api/providers/activate", async (req: Request, res: Response) => {
+    const id = typeof req.body?.id === "string" ? req.body.id.trim() : "";
+    if (!id) {
+      res.status(400).json({ ok: false, error: "缺少 id" });
+      return;
+    }
+    try {
+      await runtime.activateProvider(id);
+    } catch (err) {
+      res.status(404).json({
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    res.json({
+      ok: true,
+      providers: publicProviders(),
+      activeProviderId: runtime.activeProviderId(),
+      config: {
+        baseURL: runtime.config.baseURL,
+        model: runtime.config.model,
+        apiKeyMasked: maskApiKey(runtime.config.apiKey),
+        hasApiKey: runtime.config.apiKey.length > 0,
+        providerName: runtime.llm.providerName ?? "none",
+      },
+    });
+  });
+
+  app.post("/api/config/get", (_req, res) => {
     const cfg = runtime.config;
     const view: PublicConfig = {
       baseURL: cfg.baseURL,
@@ -410,7 +606,12 @@ export function createApp(runtime: Runtime): express.Express {
       tools: runtime.tools.list(),
     };
     // 同时下发应用配置（权限 / 插件 / 外观），前端据此渲染并保持双向一致
-    res.json({ ...view, settings: runtime.getSettings() });
+    res.json({
+      ...view,
+      providers: publicProviders(),
+      activeProviderId: runtime.activeProviderId(),
+      settings: runtime.getSettings(),
+    });
   });
 
   /**
@@ -451,7 +652,7 @@ export function createApp(runtime: Runtime): express.Express {
     }
 
     try {
-      runtime.updateLlmConfig(patch);
+      await runtime.updateLlmConfig(patch);
     } catch (err) {
       res.status(400).json({
         error: err instanceof Error ? err.message : String(err),
@@ -476,6 +677,67 @@ export function createApp(runtime: Runtime): express.Express {
       settings: runtime.getSettings(),
       tools: runtime.tools.list(),
     });
+  });
+
+  /**
+   * 拉取服务端可用模型列表。
+   *
+   * 查询参数 `baseUrl` / `apiKey` 可选：
+   *   - 不传时使用当前运行时配置（用户在设置里已保存的地址与 Key）；
+   *   - 传入时用于「刚填完还没保存」的前端预览。
+   *
+   * 兼容 OpenAI 的 `/models` 协议与 DeepSeek 的 `data[].id` 结构；
+   * 上游任何异常都转成 502 + 结构化 error，由前端降级为手填输入框。
+   */
+  app.post("/api/models", async (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const pickString = (value: unknown): string =>
+      typeof value === "string" ? value.trim() : "";
+
+    const baseURL = pickString(body.baseUrl) || runtime.config.baseURL;
+    const apiKey = pickString(body.apiKey) || runtime.config.apiKey;
+
+    if (!apiKey) {
+      res.status(400).json({ error: "缺少 API Key，请先在设置中填写" });
+      return;
+    }
+    if (!/^https?:\/\//i.test(baseURL)) {
+      res.status(400).json({ error: `baseURL 不合法：${baseURL}` });
+      return;
+    }
+
+    const endpoint = `${baseURL.replace(/\/+$/, "")}/models`;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    try {
+      const upstream = await fetch(endpoint, {
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+
+      if (!upstream.ok) {
+        const detail = await upstream.text().catch(() => "");
+        res.status(502).json({
+          error: `上游返回 ${upstream.status}`,
+          detail: detail.slice(0, 300),
+        });
+        return;
+      }
+
+      const payload: unknown = await upstream.json().catch(() => null);
+      res.json({ models: extractModelIds(payload), endpoint });
+    } catch (err) {
+      const aborted = err instanceof Error && err.name === "AbortError";
+      res.status(502).json({
+        error: aborted ? "请求超时（10s）" : "无法连接模型服务",
+        detail: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
   });
 
   app.post("/api/chat", async (req: Request, res: Response) => {
@@ -725,6 +987,12 @@ export async function startServer(
       console.log(`  本机访问:   http://${shownHost}:${actualPort}`);
       console.log(`  健康检查:   http://${shownHost}:${actualPort}/api/health`);
       console.log(`  模型:       ${runtime.config.model}`);
+      if (!runtime.config.apiKey) {
+        console.log("");
+        console.log(
+          "  ⚠️ 未检测到 API Key，请在浏览器界面的【设置】中配置",
+        );
+      }
 
       if (isWildcard) {
         const nets = networkInterfaces();

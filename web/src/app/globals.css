@@ -9,20 +9,65 @@
  *   边框      白色 6% / 12%
  *   主色      rgb(65,118,230)
  */
+/*
+ * 主题令牌。
+ *
+ * 使用 CSS 变量 + html.dark 类驱动，使浅色/深色/跟随系统真正生效：
+ *   - 默认（无 .dark）为浅色
+ *   - html.dark 为深色
+ * 组件统一使用 var(--xxx)，因此切换类名即可全局换肤。
+ */
+:root {
+  /* 浅色主题 */
+  --c-base: rgb(250, 250, 251);
+  --c-sidebar: rgb(244, 244, 246);
+  --c-layer1: rgb(255, 255, 255);
+  --c-layer2: rgb(240, 240, 243);
+  --c-layer3: rgb(228, 228, 232);
+  --c-line: rgba(0, 0, 0, 0.08);
+  --c-line-strong: rgba(0, 0, 0, 0.14);
+  --c-ink: rgb(24, 24, 27);
+  --c-ink-2: rgb(63, 63, 70);
+  --c-ink-3: rgb(82, 82, 91);
+  --c-ink-caption: rgb(161, 161, 170);
+  --c-brand: rgb(65, 118, 230);
+  --c-brand-soft: rgb(103, 158, 254);
+  --c-shadow: rgba(0, 0, 0, 0.08);
+}
+
+html.dark {
+  /* 深色主题 */
+  --c-base: rgb(21, 21, 23);
+  --c-sidebar: rgb(27, 27, 28);
+  --c-layer1: rgb(35, 35, 36);
+  --c-layer2: rgb(44, 44, 46);
+  --c-layer3: rgb(53, 54, 56);
+  --c-line: rgba(255, 255, 255, 0.06);
+  --c-line-strong: rgba(255, 255, 255, 0.12);
+  --c-ink: rgb(249, 250, 251);
+  --c-ink-2: rgb(207, 211, 214);
+  --c-ink-3: rgb(173, 178, 184);
+  --c-ink-caption: rgb(129, 133, 140);
+  --c-brand: rgb(65, 118, 230);
+  --c-brand-soft: rgb(103, 158, 254);
+  --c-shadow: rgba(0, 0, 0, 0.5);
+}
+
+/* 把变量映射为 Tailwind 颜色工具类（bg-base、text-ink 等） */
 @theme inline {
-  --color-base: rgb(21, 21, 23);
-  --color-sidebar: rgb(27, 27, 28);
-  --color-layer1: rgb(35, 35, 36);
-  --color-layer2: rgb(44, 44, 46);
-  --color-layer3: rgb(53, 54, 56);
-  --color-line: rgba(255, 255, 255, 0.06);
-  --color-line-strong: rgba(255, 255, 255, 0.12);
-  --color-ink: rgb(249, 250, 251);
-  --color-ink-2: rgb(207, 211, 214);
-  --color-ink-3: rgb(173, 178, 184);
-  --color-ink-caption: rgb(129, 133, 140);
-  --color-brand: rgb(65, 118, 230);
-  --color-brand-soft: rgb(103, 158, 254);
+  --color-base: var(--c-base);
+  --color-sidebar: var(--c-sidebar);
+  --color-layer1: var(--c-layer1);
+  --color-layer2: var(--c-layer2);
+  --color-layer3: var(--c-layer3);
+  --color-line: var(--c-line);
+  --color-line-strong: var(--c-line-strong);
+  --color-ink: var(--c-ink);
+  --color-ink-2: var(--c-ink-2);
+  --color-ink-3: var(--c-ink-3);
+  --color-ink-caption: var(--c-ink-caption);
+  --color-brand: var(--c-brand);
+  --color-brand-soft: var(--c-brand-soft);
 
   --font-sans: ui-sans-serif, -apple-system, "Segoe UI", "PingFang SC",
     "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -36,8 +81,9 @@ body {
 
 body {
   margin: 0;
-  background: var(--color-base);
-  color: var(--color-ink);
+  background: var(--c-base);
+  color: var(--c-ink);
+  transition: background-color 0.15s ease, color 0.15s ease;
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;

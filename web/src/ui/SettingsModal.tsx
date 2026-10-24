@@ -11,24 +11,32 @@ import { useEffect, useState } from "react";
 import {
   Bot,
   Check,
-  KeyRound,
   Palette,
   Plug,
   Puzzle,
+  Pencil,
+  Plus,
   RefreshCw,
+  Server,
   Settings2,
   Sparkles,
+  Trash2,
   X,
   Loader2,
 } from "lucide-react";
 
 import {
   fetchConfig,
+  fetchModels,
   updateConfig,
   fetchPlugins,
   reloadPlugins,
+  saveProvider,
+  deleteProvider,
+  activateProvider,
   type ServerConfig,
   type PluginInfo,
+  type ProviderInfo,
 } from "../lib/api";
 
 export type ThemeMode = "light" | "dark" | "system";
@@ -170,12 +178,31 @@ export function SettingsModal({
 
   // 模型相关（服务端配置）
   const [server, setServer] = useState<ServerConfig | null>(null);
-  const [apiKey, setApiKey] = useState("");
-  const [baseURL, setBaseURL] = useState("");
-  const [model, setModel] = useState("");
   const [maxSteps, setMaxSteps] = useState(8);
+  const [maxStepsMsg, setMaxStepsMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+
+  // 多提供商管理：列表 + 正在编辑的表单（"new" 表示新增）
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [activeProviderId, setActiveProviderId] = useState<string | undefined>();
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [form, setForm] = useState({
+    name: "",
+    baseURL: "",
+    model: "",
+    apiKey: "",
+  });
+  /** 已拉取到的可选模型；null 表示尚未拉取（此时展示普通输入框）。 */
+  const [modelOptions, setModelOptions] = useState<string[] | null>(null);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelHint, setModelHint] = useState("");
+
+  /** 正在编辑的那条提供商（新增时为 undefined）。 */
+  const editingProvider =
+    editingId && editingId !== "new"
+      ? providers.find((p) => p.id === editingId)
+      : undefined;
 
   // 插件管理
   const [plugins, setPlugins] = useState<PluginInfo[]>([]);
@@ -188,11 +215,14 @@ export function SettingsModal({
     void fetchConfig().then((cfg) => {
       if (!alive || !cfg) return;
       setServer(cfg);
-      setBaseURL(cfg.baseURL);
-      setModel(cfg.model);
       setMaxSteps(cfg.maxSteps);
-      setApiKey("");
+      setProviders(cfg.providers ?? []);
+      setActiveProviderId(cfg.activeProviderId);
       setMessage(null);
+      setMaxStepsMsg("");
+      setEditingId(null);
+      setModelOptions(null);
+      setModelHint("");
     });
     return () => {
       alive = false;
@@ -224,26 +254,139 @@ export function SettingsModal({
 
   if (!open) return null;
 
-  const saveModel = async () => {
-    setSaving(true);
+  /** 把服务端返回的最新提供商列表写回本地状态。 */
+  const applyProviders = (r: {
+    providers: ProviderInfo[];
+    activeProviderId?: string;
+  }) => {
+    setProviders(r.providers);
+    setActiveProviderId(r.activeProviderId);
+  };
+
+  /** 打开「新增」表单。 */
+  const startCreate = () => {
+    setEditingId("new");
+    setForm({ name: "", baseURL: "", model: "", apiKey: "" });
+    setModelOptions(null);
+    setModelHint("");
     setMessage(null);
-    const result = await updateConfig({
-      model,
-      baseURL,
-      maxSteps,
-      ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
-    });
-    setSaving(false);
-    if (result.ok) {
-      setApiKey("");
-      setMessage({ ok: true, text: "已保存并生效" });
-      const fresh = await fetchConfig();
-      setServer(fresh);
-      onSaved(fresh);
+  };
+
+  /** 打开「编辑」表单（密钥不回填，留空即不修改）。 */
+  const startEdit = (p: ProviderInfo) => {
+    setEditingId(p.id);
+    setForm({ name: p.name, baseURL: p.baseURL, model: p.model, apiKey: "" });
+    setModelOptions(null);
+    setModelHint("");
+    setMessage(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setMessage(null);
+  };
+
+  /**
+   * 一键获取模型列表。
+   *
+   * 优先用表单里（可能尚未保存）的 Base URL 与 Key；
+   * 编辑既有提供商且 Key 留空时，交由服务端用已保存的密钥补齐。
+   */
+  const doFetchModels = async () => {
+    setFetchingModels(true);
+    setModelHint("");
+    const r = await fetchModels(
+      form.baseURL,
+      form.apiKey.trim() || (editingProvider?.hasApiKey ? undefined : ""),
+    );
+    setFetchingModels(false);
+    if (r.ok) {
+      setModelOptions(r.models);
+      if (!r.models.includes(form.model)) {
+        setForm((f) => ({ ...f, model: r.models[0] }));
+      }
+      setModelHint(`已获取 ${r.models.length} 个可用模型`);
     } else {
-      setMessage({ ok: false, text: result.error ?? "保存失败" });
+      setModelOptions(null);
+      setModelHint(
+        r.error
+          ? `获取失败，请手动输入模型名（${r.error}）`
+          : "获取失败，请手动输入模型名",
+      );
     }
   };
+
+  /** 保存提供商（新增或更新）。 */
+  const saveProviderForm = async () => {
+    if (!form.baseURL.trim()) {
+      setMessage({ ok: false, text: "Base URL 不能为空" });
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    const r = await saveProvider({
+      ...(editingId && editingId !== "new" ? { id: editingId } : {}),
+      name: form.name.trim(),
+      baseURL: form.baseURL.trim(),
+      model: form.model.trim(),
+      ...(form.apiKey.trim() ? { apiKey: form.apiKey.trim() } : {}),
+    });
+    setSaving(false);
+    if (r.ok) {
+      applyProviders(r);
+      setEditingId(null);
+      setModelOptions(null);
+      setMessage({ ok: true, text: "已保存并生效" });
+      onSaved(await fetchConfig());
+    } else {
+      setMessage({ ok: false, text: r.error ?? "保存失败" });
+    }
+  };
+
+  /** 切换激活的提供商（热生效，无需重启）。 */
+  const doActivate = async (id: string) => {
+    const r = await activateProvider(id);
+    if (r.ok) {
+      applyProviders(r);
+      onSaved(await fetchConfig());
+    } else {
+      setMessage({ ok: false, text: r.error ?? "启用失败" });
+    }
+  };
+
+  /** 删除提供商；正在编辑它时同步关闭表单。 */
+  const doDelete = async (id: string) => {
+    const r = await deleteProvider(id);
+    if (r.ok) {
+      applyProviders(r);
+      if (editingId === id) setEditingId(null);
+      onSaved(await fetchConfig());
+    } else {
+      setMessage({ ok: false, text: r.error ?? "删除失败" });
+    }
+  };
+
+  /** 最大步数是运行时参数，不归属任何提供商，单独保存。 */
+  const saveMaxSteps = async () => {
+    setSaving(true);
+    setMaxStepsMsg("");
+    const r = await updateConfig({ maxSteps });
+    setSaving(false);
+    if (r.ok) {
+      setMaxStepsMsg("已保存");
+      onSaved(await fetchConfig());
+    } else {
+      setMaxStepsMsg("");
+      setMessage({ ok: false, text: r.error ?? "保存失败" });
+    }
+  };
+
+  /** 常用提供商的 Base URL 预设，省去手打。 */
+  const PROVIDER_PRESETS = [
+    { name: "DeepSeek", baseURL: "https://api.deepseek.com" },
+    { name: "OpenAI", baseURL: "https://api.openai.com/v1" },
+    { name: "Ollama", baseURL: "http://127.0.0.1:11434/v1" },
+  ];
 
   return (
     <div
@@ -351,93 +494,254 @@ export function SettingsModal({
             {tab === "model" ? (
               <div className="space-y-4">
                 <section>
-                  <h3 className="mb-2 flex items-center gap-1.5 text-[12px] text-ink-3">
-                    <KeyRound size={12} />
-                    当前提供商
-                  </h3>
-                  <div className="rounded-lg border border-line bg-base/40 p-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-[13px] text-ink-2">
-                        {server?.providerName === "mock" ? "Mock（演示）" : "OpenAI 兼容"}
-                      </span>
-                      <span className="text-[11px] text-ink-caption">
-                        {server?.hasApiKey ? `密钥 ${server.apiKeyMasked}` : "未配置密钥"}
-                      </span>
+                  <div className="mb-2 flex items-center justify-between">
+                    <h3 className="flex items-center gap-1.5 text-[12px] text-ink-3">
+                      <Server size={12} />
+                      模型提供商
+                    </h3>
+                    <button
+                      type="button"
+                      onClick={startCreate}
+                      className="flex items-center gap-1 rounded-md border border-line-strong px-2 py-1 text-[11px] text-ink-2 transition-colors hover:border-brand hover:text-brand"
+                    >
+                      <Plus size={11} />
+                      添加提供商
+                    </button>
+                  </div>
+
+                  {providers.length === 0 && !editingId ? (
+                    <div className="rounded-lg border border-dashed border-line-strong px-3 py-4 text-center text-[12px] text-ink-caption">
+                      还没有任何提供商，点击右上角「添加提供商」开始配置。
                     </div>
+                  ) : null}
+
+                  <div className="space-y-1.5">
+                    {providers.map((p) => {
+                      const isActive = p.id === activeProviderId;
+                      return (
+                        <div
+                          key={p.id}
+                          className={`flex items-center gap-2 rounded-lg border px-2.5 py-2 transition-colors ${
+                            isActive
+                              ? "border-brand/60 bg-brand/5"
+                              : "border-line bg-base/40 hover:border-line-strong"
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => void doActivate(p.id)}
+                            title={isActive ? "当前使用中" : "点击启用"}
+                            aria-label={isActive ? "当前使用中" : "启用该提供商"}
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors ${
+                              isActive
+                                ? "border-brand bg-brand text-white"
+                                : "border-line-strong text-transparent hover:border-brand"
+                            }`}
+                          >
+                            <Check size={10} />
+                          </button>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-[12.5px] text-ink">
+                                {p.name}
+                              </span>
+                              {isActive ? (
+                                <span className="shrink-0 rounded bg-brand/15 px-1 text-[10px] text-brand">
+                                  使用中
+                                </span>
+                              ) : null}
+                            </div>
+                            <div className="truncate text-[11px] text-ink-caption">
+                              {p.model || "未选模型"} · {p.baseURL}
+                              {p.hasApiKey ? "" : " · 未配置密钥"}
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(p)}
+                            className="shrink-0 rounded p-1 text-ink-caption transition-colors hover:text-ink"
+                            aria-label="编辑"
+                          >
+                            <Pencil size={12} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void doDelete(p.id)}
+                            className="shrink-0 rounded p-1 text-ink-caption transition-colors hover:text-red-400"
+                            aria-label="删除"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 </section>
 
-                <section className="space-y-3">
-                  <h3 className="text-[12px] text-ink-3">添加模型提供商</h3>
+                {editingId !== null ? (
+                  <section className="space-y-3 rounded-lg border border-line bg-base/40 p-3">
+                    <h3 className="text-[12px] text-ink-3">
+                      {editingId === "new" ? "新增提供商" : "编辑提供商"}
+                    </h3>
 
-                  <div>
-                    <label className="mb-1.5 block text-[12px] text-ink-caption">Base URL</label>
-                    <input
-                      value={baseURL}
-                      onChange={(e) => setBaseURL(e.target.value)}
-                      placeholder="https://api.deepseek.com"
-                      spellCheck={false}
-                      className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
-                    />
-                  </div>
+                    <div>
+                      <label className="mb-1.5 block text-[12px] text-ink-caption">名称</label>
+                      <input
+                        value={form.name}
+                        onChange={(e) => setForm({ ...form, name: e.target.value })}
+                        placeholder="DeepSeek 官方"
+                        spellCheck={false}
+                        className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                      />
+                    </div>
 
-                  <div>
-                    <label className="mb-1.5 block text-[12px] text-ink-caption">模型</label>
-                    <input
-                      value={model}
-                      onChange={(e) => setModel(e.target.value)}
-                      placeholder="deepseek-chat"
-                      spellCheck={false}
-                      className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
-                    />
-                  </div>
+                    <div>
+                      <label className="mb-1.5 block text-[12px] text-ink-caption">Base URL</label>
+                      <input
+                        value={form.baseURL}
+                        onChange={(e) => setForm({ ...form, baseURL: e.target.value })}
+                        placeholder="https://api.deepseek.com"
+                        spellCheck={false}
+                        className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                      />
+                      {/* 常用地址一键填充，省去手打 */}
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        {PROVIDER_PRESETS.map((preset) => (
+                          <button
+                            key={preset.baseURL}
+                            type="button"
+                            onClick={() =>
+                              setForm((f) => ({
+                                ...f,
+                                name: f.name || preset.name,
+                                baseURL: preset.baseURL,
+                              }))
+                            }
+                            className="rounded border border-line px-1.5 py-0.5 text-[10.5px] text-ink-caption transition-colors hover:border-brand hover:text-brand"
+                          >
+                            {preset.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
 
-                  <div>
-                    <label className="mb-1.5 block text-[12px] text-ink-caption">API Key</label>
-                    <input
-                      type="password"
-                      value={apiKey}
-                      onChange={(e) => setApiKey(e.target.value)}
-                      placeholder={
-                        server?.hasApiKey
-                          ? `已配置 ${server.apiKeyMasked}（留空不修改）`
-                          : "未配置，请输入 sk-..."
-                      }
-                      autoComplete="off"
-                      spellCheck={false}
-                      className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
-                    />
-                  </div>
+                    <div>
+                      <div className="mb-1.5 flex items-center justify-between">
+                        <label className="block text-[12px] text-ink-caption">模型</label>
+                        <button
+                          type="button"
+                          onClick={() => void doFetchModels()}
+                          disabled={fetchingModels}
+                          className="flex items-center gap-1 rounded-md border border-line-strong px-2 py-1 text-[11px] text-ink-2 transition-colors hover:border-brand hover:text-brand disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          <RefreshCw size={11} className={fetchingModels ? "animate-spin" : ""} />
+                          {fetchingModels ? "获取中…" : "获取可用模型"}
+                        </button>
+                      </div>
+                      {modelOptions && modelOptions.length > 0 ? (
+                        <select
+                          value={form.model}
+                          onChange={(e) => setForm({ ...form, model: e.target.value })}
+                          className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                        >
+                          {modelOptions.map((m) => (
+                            <option key={m} value={m}>
+                              {m}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          value={form.model}
+                          onChange={(e) => setForm({ ...form, model: e.target.value })}
+                          placeholder="deepseek-chat"
+                          spellCheck={false}
+                          className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                        />
+                      )}
+                      {modelHint ? (
+                        <p
+                          className={`mt-1.5 text-[11px] ${
+                            modelOptions ? "text-ink-caption" : "text-danger"
+                          }`}
+                        >
+                          {modelHint}
+                        </p>
+                      ) : null}
+                    </div>
 
-                  <div>
-                    <label className="mb-1.5 block text-[12px] text-ink-caption">最大步数</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={50}
-                      value={maxSteps}
-                      onChange={(e) => setMaxSteps(Number(e.target.value))}
-                      className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
-                    />
-                  </div>
+                    <div>
+                      <label className="mb-1.5 block text-[12px] text-ink-caption">API Key</label>
+                      <input
+                        type="password"
+                        value={form.apiKey}
+                        onChange={(e) => setForm({ ...form, apiKey: e.target.value })}
+                        placeholder={
+                          editingId === "new"
+                            ? "sk-...（仅本地保存，权限 0600）"
+                            : editingProvider?.hasApiKey
+                              ? `已配置 ${editingProvider.apiKeyMasked}（留空不修改）`
+                              : "未配置，请输入 sk-..."
+                        }
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                      />
+                    </div>
 
-                  <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => void saveProviderForm()}
+                        disabled={saving}
+                        className="rounded-lg bg-brand px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                      >
+                        {saving ? "保存中…" : "保存"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEdit}
+                        className="rounded-lg border border-line-strong px-3 py-1.5 text-[12px] text-ink-2 transition-colors hover:text-ink"
+                      >
+                        取消
+                      </button>
+                      {message ? (
+                        <span
+                          className={`text-[12px] ${
+                            message.ok ? "text-emerald-400" : "text-red-400"
+                          }`}
+                        >
+                          {message.text}
+                        </span>
+                      ) : null}
+                    </div>
+                  </section>
+                ) : null}
+
+                <section>
+                  <label className="mb-1.5 block text-[12px] text-ink-caption">最大步数</label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={50}
+                    value={maxSteps}
+                    onChange={(e) => setMaxSteps(Number(e.target.value))}
+                    className="w-full rounded-lg border border-line-strong bg-base px-3 py-2 text-[13px] text-ink outline-none transition-colors focus:border-brand"
+                  />
+                  <p className="mt-1.5 text-[11px] text-ink-caption">
+                    单轮 Agent 循环最多执行的步数，保存后立即生效。
+                  </p>
+                  <div className="mt-2 flex items-center gap-3">
                     <button
                       type="button"
-                      onClick={() => void saveModel()}
+                      onClick={() => void saveMaxSteps()}
                       disabled={saving}
-                      className="rounded-lg bg-brand px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                      className="rounded-lg border border-line-strong px-3 py-1.5 text-[12px] text-ink-2 transition-colors hover:border-brand hover:text-brand disabled:opacity-50"
                     >
-                      {saving ? "保存中…" : "保存"}
+                      保存步数
                     </button>
-                    {message ? (
-                      <span
-                        className={`text-[12px] ${
-                          message.ok ? "text-emerald-400" : "text-red-400"
-                        }`}
-                      >
-                        {message.text}
-                      </span>
+                    {maxStepsMsg ? (
+                      <span className="text-[12px] text-emerald-400">{maxStepsMsg}</span>
                     ) : null}
                   </div>
                 </section>

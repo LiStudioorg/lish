@@ -1,6 +1,6 @@
 {
   "name": "@listudioorg/lish",
-  "version": "0.1.0-alpha.2",
+  "version": "0.1.0-alpha.3",
   "description": "面向智能体应用的微内核基础设施：事件溯源、插件热插拔、全链路可观测、路径沙箱",
   "main": "index.js",
   "type": "module",
@@ -28,6 +28,7 @@
     "lint": "eslint src scripts examples",
     "test:trace": "tsx src/core/test-trace.ts",
     "test:subagent": "tsx src/core/test-subagent.ts",
+    "test:config": "tsx src/core/test-config.ts",
     "build:assets": "node scripts/copy-web-assets.mjs",
     "prepare": "npm run build:web:ci && npm run build:cli && npm run build:assets",
     "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build"
@@ -81,7 +82,8 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs"
   ],
   "publishConfig": {
     "access": "public"

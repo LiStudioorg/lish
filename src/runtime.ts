@@ -6,7 +6,7 @@
  */
 
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { Context } from "./kernel/context.js";
 import { AgentLoop } from "./core/agent-loop.js";
@@ -32,7 +32,8 @@ import {
 import { PluginHotReloader } from "./core/plugins/hot-reload.js";
 import { discoverPlugins, ensurePluginDir } from "./core/plugins/discover.js";
 import type { LoadedPluginInfo } from "./core/plugins/loader.js";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 
 /** 前端共享的运行时配置。 */
 export interface RuntimeConfig {
@@ -65,11 +66,237 @@ export class UsageError extends Error {
 }
 
 /**
- * 从环境变量读取运行时配置。
+ * 未配置 API Key 时的占位 Provider。
  *
- * - LLM_API_KEY   必填
- * - LLM_BASE_URL  默认 https://api.deepseek.com
- * - LLM_MODEL     默认 deepseek-chat
+ * 存在的意义：**Web / TUI 必须能在裸环境下启动**。
+ * 真正的密钥缺失不应该变成「进程起不来」，而应该在用户发出第一条消息时
+ * 给出可操作的指引（去设置里填 Key）。因此这里只在 `generate` 时报错。
+ */
+export class UnconfiguredProvider implements LlmProvider {
+  readonly name = "unconfigured";
+
+  generate(): Promise<never> {
+    return Promise.reject(
+      new UsageError(
+        "尚未配置 API Key，请点击左下角【设置】填写您的 API Key 和模型后重试。",
+      ),
+    );
+  }
+}
+
+/**
+ * 一个「模型提供商」条目。
+ *
+ * 用户可以在设置里添加任意多个（DeepSeek / OpenAI / 本地 Ollama / 中转网关…），
+ * 运行时始终只使用当前激活的那一个。
+ */
+export interface ProviderEntry {
+  /** 稳定 id，创建后不变，用于选中与删除。 */
+  id: string;
+  /** 展示名，用户可改，例如「DeepSeek 官方」。 */
+  name: string;
+  baseURL: string;
+  apiKey: string;
+  /** 最近一次选择的模型；获取模型列表后会被写入。 */
+  model: string;
+}
+
+/**
+ * `~/.lish/config.json` 的持久化结构。
+ *
+ * 兼容早期扁平结构（顶层 `apiKey` / `baseURL` / `model`）：
+ * 读取时若没有 `providers` 但存在顶层字段，会自动迁移成一条提供商记录。
+ */
+export interface FileConfig {
+  providers?: ProviderEntry[];
+  activeProviderId?: string;
+  /** 以下为 v0.1 的扁平字段，仅用于向后兼容读取。 */
+  apiKey?: string;
+  baseURL?: string;
+  model?: string;
+}
+
+/** 配置文件路径：尊重 `LISH_CONFIG_FILE` 覆盖（测试用），否则 `~/.lish/config.json`。 */
+export function configFilePath(env: NodeJS.ProcessEnv = process.env): string {
+  const custom = env.LISH_CONFIG_FILE?.trim();
+  if (custom) return custom;
+  return join(homedir(), ".lish", "config.json");
+}
+
+/** 生成一个稳定且可读的提供商 id（无需外部依赖）。 */
+export function makeProviderId(): string {
+  return `p_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** 规范化单条提供商记录；字段类型不对或缺少 id 时返回 null。 */
+function normalizeProvider(raw: unknown): ProviderEntry | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  const str = (key: string): string =>
+    typeof r[key] === "string" ? (r[key] as string).trim() : "";
+  const id = str("id");
+  if (!id) return null;
+  const baseURL = str("baseURL") || str("baseUrl") || DEFAULTS.baseURL;
+  return {
+    id,
+    name: str("name") || baseURL,
+    baseURL,
+    apiKey: str("apiKey"),
+    model: str("model"),
+  };
+}
+
+/**
+ * 读取 `~/.lish/config.json`。
+ *
+ * 任何异常（文件不存在、JSON 损坏、字段类型不对）都降级为空配置，
+ * 绝不因为配置文件问题阻断启动。
+ */
+export function readFileConfig(
+  env: NodeJS.ProcessEnv = process.env,
+): FileConfig {
+  const file = configFilePath(env);
+  try {
+    if (!existsSync(file)) return {};
+    const raw = readFileSync(file, "utf8");
+    if (!raw.trim()) return {};
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    const record = parsed as Record<string, unknown>;
+    const pick = (key: string): string | undefined => {
+      const value = record[key];
+      return typeof value === "string" && value.trim() ? value.trim() : undefined;
+    };
+
+    const legacy = {
+      apiKey: pick("apiKey"),
+      baseURL: pick("baseURL") ?? pick("baseUrl"),
+      model: pick("model"),
+    };
+
+    const providers = Array.isArray(record.providers)
+      ? record.providers
+          .map(normalizeProvider)
+          .filter((p): p is ProviderEntry => p !== null)
+      : [];
+
+    // 向后兼容：老版本只有扁平字段 → 自动迁移成一条提供商
+    if (providers.length === 0 && (legacy.apiKey || legacy.baseURL || legacy.model)) {
+      const migrated: ProviderEntry = {
+        id: makeProviderId(),
+        name: legacy.baseURL ?? DEFAULTS.baseURL,
+        baseURL: legacy.baseURL ?? DEFAULTS.baseURL,
+        apiKey: legacy.apiKey ?? "",
+        model: legacy.model ?? "",
+      };
+      return {
+        providers: [migrated],
+        activeProviderId: migrated.id,
+        ...legacy,
+      };
+    }
+
+    const activeId = pick("activeProviderId");
+    return {
+      providers,
+      activeProviderId:
+        activeId && providers.some((p) => p.id === activeId)
+          ? activeId
+          : providers[0]?.id,
+      ...legacy,
+    };
+  } catch {
+    return {};
+  }
+}
+
+/** 取当前激活的提供商；没有则返回 undefined。 */
+export function activeProvider(
+  config: FileConfig,
+): ProviderEntry | undefined {
+  const list = config.providers ?? [];
+  if (list.length === 0) return undefined;
+  return list.find((p) => p.id === config.activeProviderId) ?? list[0];
+}
+
+/**
+ * 把提供商表写回 `~/.lish/config.json`。
+ *
+ * 采用「整表覆盖」而不是增量合并：提供商可能被新增、改名、删除，
+ * 增量语义无法表达删除。写失败不抛错（只读文件系统、权限不足等），
+ * 仅返回 false 交由调用方告警——绝不因落盘失败阻断交互。
+ *
+ * 文件权限固定 0600，因为它包含明文密钥。
+ */
+export async function saveProviders(
+  providers: ProviderEntry[],
+  activeProviderId: string | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const file = configFilePath(env);
+  try {
+    await mkdir(dirname(file), { recursive: true });
+    const body: FileConfig = {
+      providers,
+      ...(activeProviderId ? { activeProviderId } : {}),
+    };
+    await writeFile(file, JSON.stringify(body, null, 2) + "\n", {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 把若干字段写入「当前激活的提供商」，必要时自动补建一条。
+ *
+ * 保留该函数是为了让单字段更新（如只改 maxSteps 之外的模型参数）
+ * 仍然只影响激活项，而不是另起一条记录。
+ */
+export async function writeFileConfig(
+  patch: FileConfig,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<boolean> {
+  const current = readFileConfig(env);
+  const list = [...(current.providers ?? [])];
+  const active = activeProvider(current);
+  let activeId = current.activeProviderId;
+
+  if (active) {
+    const idx = list.findIndex((p) => p.id === active.id);
+    list[idx] = {
+      ...active,
+      ...(patch.apiKey ? { apiKey: patch.apiKey } : {}),
+      ...(patch.baseURL ? { baseURL: patch.baseURL } : {}),
+      ...(patch.model ? { model: patch.model } : {}),
+    };
+  } else {
+    const created: ProviderEntry = {
+      id: makeProviderId(),
+      name: patch.baseURL ?? DEFAULTS.baseURL,
+      baseURL: patch.baseURL ?? DEFAULTS.baseURL,
+      apiKey: patch.apiKey ?? "",
+      model: patch.model ?? "",
+    };
+    list.push(created);
+    activeId = created.id;
+  }
+  return saveProviders(list, activeId ?? list[0]?.id, env);
+}
+
+/**
+ * 从环境变量 + `~/.lish/config.json` 读取运行时配置。
+ *
+ * 优先级：**环境变量 > `~/.lish/config.json` > 空配置**。
+ * 没有 API Key 时不再抛错——Web 与 TUI 必须能在裸环境下启动，
+ * 由前端引导用户在设置里填写。
+ *
+ * - LLM_API_KEY / LLM_BASE_URL / LLM_MODEL  覆盖配置文件
  * - LLISH_MAX_STEPS 默认 8
  * - LLISH_NO_PERSIST 设置后会话不落盘
  * - LLISH_MOCK=1    使用 MockProvider，无需 API Key、不联网（用于演示与端到端自测）
@@ -79,12 +306,13 @@ export function readConfig(
   overrides: Partial<RuntimeConfig> = {},
 ): RuntimeConfig {
   const useMock = env.LLISH_MOCK === "1" && !overrides.provider;
-  const apiKey = env.LLM_API_KEY?.trim() ?? "";
-  if (!apiKey && !overrides.provider && !useMock) {
-    throw new UsageError(
-      "缺少环境变量 LLM_API_KEY。\n示例：LLM_API_KEY=sk-xxx lish web",
-    );
-  }
+  const fileConfig = readFileConfig(env);
+  const active = activeProvider(fileConfig);
+
+  // 优先级：环境变量 > 当前激活的提供商 > 空配置
+  const apiKey = env.LLM_API_KEY?.trim() || active?.apiKey || "";
+  const fileBaseURL = active?.baseURL || fileConfig.baseURL;
+  const fileModel = active?.model || fileConfig.model;
 
   const maxStepsRaw = env.LLISH_MAX_STEPS?.trim();
   const maxSteps = maxStepsRaw ? Number(maxStepsRaw) : DEFAULTS.maxSteps;
@@ -99,8 +327,8 @@ export function readConfig(
 
   return {
     apiKey,
-    baseURL: env.LLM_BASE_URL?.trim() || DEFAULTS.baseURL,
-    model: env.LLM_MODEL?.trim() || DEFAULTS.model,
+    baseURL: env.LLM_BASE_URL?.trim() || fileBaseURL || DEFAULTS.baseURL,
+    model: env.LLM_MODEL?.trim() || fileModel || DEFAULTS.model,
     maxSteps: Math.floor(maxSteps),
     workspaceRoot: process.cwd(),
     sessionDir: env.LLISH_NO_PERSIST ? null : join(homedir(), ".lish", "sessions"),
@@ -123,7 +351,18 @@ export interface Runtime {
    * 这正是 LlmRuntime 热切换能力的设计用途，无需重启进程。
    * 返回更新后的配置快照。
    */
-  updateLlmConfig(patch: LlmConfigPatch): RuntimeConfig;
+  /** 热更新模型连接配置，并持久化到 ~/.lish/config.json。 */
+  updateLlmConfig(patch: LlmConfigPatch): Promise<RuntimeConfig>;
+  /** 全部已保存的提供商（含明文密钥，仅供后端内部使用）。 */
+  listProviders(): ProviderEntry[];
+  /** 当前激活的提供商 id。 */
+  activeProviderId(): string | undefined;
+  /** 新增或就地更新一个提供商（按 id 匹配），必要时切换激活项。 */
+  upsertProvider(entry: Partial<ProviderEntry>): Promise<ProviderEntry[]>;
+  /** 删除一个提供商；删掉激活项时自动回落到第一条。 */
+  removeProvider(id: string): Promise<ProviderEntry[]>;
+  /** 切换激活的提供商，并立即热切换底层 Provider。 */
+  activateProvider(id: string): Promise<RuntimeConfig>;
   /** 当前应用配置（权限、插件开关、外观）。 */
   getSettings(): AppSettings;
   /** 合并并持久化应用配置，同时让工具注册即时生效。 */
@@ -163,12 +402,26 @@ export interface PublicConfig {
   providerName: string;
   /** 前端不应拿到完整密钥。 */
   tools: string[];
+  /** 提供商列表（密钥已脱敏），供设置面板管理多个来源。 */
+  providers?: PublicProvider[];
+  activeProviderId?: string;
+}
+
+/** 对外暴露的提供商视图（apiKey 永久脱敏）。 */
+export interface PublicProvider {
+  id: string;
+  name: string;
+  baseURL: string;
+  model: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
 }
 
 /** 脱敏 API Key：仅保留前 3 位与后 4 位。 */
 export function maskApiKey(key: string): string {
   if (!key) return "";
-  if (key.length <= 8) return "*".repeat(key.length);
+  // 短密钥固定输出，避免通过 "*" 的数量反推真实长度
+  if (key.length <= 8) return "sk-…****";
   return `${key.slice(0, 3)}…${key.slice(-4)}`;
 }
 
@@ -191,11 +444,14 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   // LLM 运行时
   const provider =
     config.provider ??
-    new OpenAIProvider({
-      apiKey: config.apiKey,
-      baseURL: config.baseURL,
-      model: config.model,
-    });
+    (config.apiKey
+      ? new OpenAIProvider({
+          apiKey: config.apiKey,
+          baseURL: config.baseURL,
+          model: config.model,
+        })
+      : new UnconfiguredProvider());
+
   const llm = new LlmRuntime(ctx, { provider });
   ctx.provide(LlmRuntime.KEY, llm);
 
@@ -344,7 +600,9 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   // 可变配置：设置面板通过 updateLlmConfig 热更新
   let currentConfig: RuntimeConfig = { ...config };
 
-  const updateLlmConfig = (patch: LlmConfigPatch): RuntimeConfig => {
+  const updateLlmConfig = async (
+    patch: LlmConfigPatch,
+  ): Promise<RuntimeConfig> => {
     const next: RuntimeConfig = {
       ...currentConfig,
       ...(patch.baseURL !== undefined && patch.baseURL.trim().length > 0
@@ -366,14 +624,82 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     // 若是 Mock 模式，保持 Mock，不因设置面板改动而切到真实网络。
     if (!(currentConfig.provider && currentConfig.provider.name === "mock")) {
       llm.setProvider(
-        new OpenAIProvider({
-          apiKey: next.apiKey,
-          baseURL: next.baseURL,
-          model: next.model,
-        }),
+        next.apiKey
+          ? new OpenAIProvider({
+              apiKey: next.apiKey,
+              baseURL: next.baseURL,
+              model: next.model,
+            })
+          : new UnconfiguredProvider(),
       );
     }
+    // 落盘：把这几个字段写回「当前激活的提供商」，而不是另起一条记录。
+    // 若此刻还没有任何提供商（首次使用），自动补建一条，保证配置可回放。
+    const target = providers.find((p) => p.id === currentProviderId);
+    if (target) {
+      providers = providers.map((p) =>
+        p.id === target.id
+          ? {
+              ...p,
+              ...(patch.apiKey ? { apiKey: patch.apiKey.trim() } : {}),
+              ...(patch.baseURL?.trim() ? { baseURL: patch.baseURL.trim() } : {}),
+              ...(patch.model?.trim() ? { model: patch.model.trim() } : {}),
+            }
+          : p,
+      );
+    } else {
+      const created: ProviderEntry = {
+        id: makeProviderId(),
+        name: next.baseURL,
+        baseURL: next.baseURL,
+        apiKey: next.apiKey,
+        model: next.model,
+      };
+      providers = [...providers, created];
+      currentProviderId = created.id;
+    }
+    await persistProviders();
+
     return currentConfig;
+  };
+
+  // --- 多提供商管理 ------------------------------------------------------
+  // 内存里保存完整列表（含明文 Key），只在后端使用；接口层负责脱敏。
+
+  const initialFileConfig = readFileConfig();
+  let providers: ProviderEntry[] = [...(initialFileConfig.providers ?? [])];
+  let currentProviderId: string | undefined = initialFileConfig.activeProviderId;
+
+  /** 把指定提供商装载到底层 LlmRuntime（Mock 模式除外）。 */
+  const applyProvider = (entry: ProviderEntry | undefined): void => {
+    if (currentConfig.provider && currentConfig.provider.name === "mock") return;
+    if (!entry || !entry.apiKey) {
+      llm.setProvider(new UnconfiguredProvider());
+      return;
+    }
+    llm.setProvider(
+      new OpenAIProvider({
+        apiKey: entry.apiKey,
+        baseURL: entry.baseURL || DEFAULTS.baseURL,
+        model: entry.model || DEFAULTS.model,
+      }),
+    );
+  };
+
+  /** 由提供商条目推导出运行时配置快照。 */
+  const configFromProvider = (base: RuntimeConfig): RuntimeConfig => {
+    const entry = providers.find((p) => p.id === currentProviderId);
+    if (!entry) return base;
+    return {
+      ...base,
+      apiKey: entry.apiKey,
+      baseURL: entry.baseURL || DEFAULTS.baseURL,
+      model: entry.model || DEFAULTS.model,
+    };
+  };
+
+  const persistProviders = async (): Promise<void> => {
+    await saveProviders(providers, currentProviderId);
   };
 
   return {
@@ -387,6 +713,71 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
       return currentConfig;
     },
     workspaceRoot: config.workspaceRoot,
+    listProviders() {
+      return providers.map((p) => ({ ...p }));
+    },
+    activeProviderId() {
+      return currentProviderId;
+    },
+    async upsertProvider(entry) {
+      const id = entry.id?.trim();
+      const existing = id ? providers.find((p) => p.id === id) : undefined;
+      if (existing) {
+        const merged: ProviderEntry = {
+          ...existing,
+          ...(entry.name !== undefined ? { name: entry.name.trim() || existing.name } : {}),
+          ...(entry.baseURL !== undefined
+            ? { baseURL: entry.baseURL.trim() || existing.baseURL }
+            : {}),
+          // 空字符串视为「不修改密钥」，避免前端把脱敏值回写
+          ...(entry.apiKey ? { apiKey: entry.apiKey.trim() } : {}),
+          ...(entry.model !== undefined ? { model: entry.model.trim() } : {}),
+        };
+        providers = providers.map((p) => (p.id === existing.id ? merged : p));
+        if (currentProviderId === merged.id) {
+          currentConfig = configFromProvider(currentConfig);
+          applyProvider(merged);
+        }
+      } else {
+        const created: ProviderEntry = {
+          id: makeProviderId(),
+          name: entry.name?.trim() || entry.baseURL?.trim() || "新提供商",
+          baseURL: entry.baseURL?.trim() || DEFAULTS.baseURL,
+          apiKey: entry.apiKey?.trim() ?? "",
+          model: entry.model?.trim() || DEFAULTS.model,
+        };
+        providers = [...providers, created];
+        // 第一条自动激活，省掉用户再点一次
+        if (!currentProviderId) {
+          currentProviderId = created.id;
+          currentConfig = configFromProvider(currentConfig);
+          applyProvider(created);
+        }
+      }
+      await persistProviders();
+      return providers.map((p) => ({ ...p }));
+    },
+    async removeProvider(id) {
+      providers = providers.filter((p) => p.id !== id);
+      if (currentProviderId === id) {
+        currentProviderId = providers[0]?.id;
+        currentConfig = configFromProvider(currentConfig);
+        applyProvider(providers[0]);
+      }
+      await persistProviders();
+      return providers.map((p) => ({ ...p }));
+    },
+    async activateProvider(id) {
+      const entry = providers.find((p) => p.id === id);
+      if (!entry) {
+        throw new UsageError(`提供商不存在：${id}`);
+      }
+      currentProviderId = entry.id;
+      currentConfig = configFromProvider(currentConfig);
+      applyProvider(entry);
+      await persistProviders();
+      return currentConfig;
+    },
     listPlugins() {
       return loader.list();
     },

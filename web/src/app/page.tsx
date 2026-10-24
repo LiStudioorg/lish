@@ -24,7 +24,9 @@ import {
   ChevronDown,
   ChevronRight,
   Lock,
+  Bot,
   MessageSquarePlus,
+  Puzzle,
   Settings,
   Square,
   Trash2,
@@ -39,10 +41,13 @@ import {
   updateAppSettings,
   fetchTraceEvents,
   fetchSubAgents,
+  fetchPlugins,
+  reloadPlugins,
   type TraceEvent,
   type SubAgentRecord,
   type ServerConfig,
   type ToolStreamEvent,
+  type PluginInfo,
   type AppSettings as ServerAppSettings,
 } from "../lib/api";
 import { RightPanel } from "../ui/RightPanel";
@@ -201,11 +206,11 @@ function Select<T extends string>({
         type="button"
         onClick={() => setOpen((v) => !v)}
         title={title}
-        className="flex items-center gap-1.5 rounded-lg border border-line-strong px-2 py-1 text-[11.5px] text-ink-3 transition-colors hover:bg-white/[0.04] hover:text-ink-2"
+        className="flex max-w-[130px] items-center gap-1.5 rounded-lg border border-line-strong px-2 py-1 text-[11.5px] text-ink-3 transition-colors hover:bg-white/[0.04] hover:text-ink-2 sm:max-w-none"
       >
         {icon}
-        <span className="whitespace-nowrap">{current?.label ?? ""}</span>
-        <ChevronDown size={11} />
+        <span className="truncate whitespace-nowrap">{current?.label ?? ""}</span>
+        <ChevronDown size={11} className="shrink-0" />
       </button>
       {open ? (
         <>
@@ -250,6 +255,13 @@ export default function Home() {
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
   /** 子代理记录（状态栏计数 + 轨迹分组） */
   const [subAgents, setSubAgents] = useState<SubAgentRecord[]>([]);
+  /** 侧边栏视图：会话列表 / 插件 / 自动化任务 */
+  const [sideView, setSideView] = useState<"sessions" | "plugins" | "tasks">(
+    "sessions",
+  );
+  /** 插件列表（侧边栏插件视图用） */
+  const [pluginList, setPluginList] = useState<PluginInfo[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -266,6 +278,25 @@ export default function Home() {
     });
   }, []);
 
+  /**
+   * 插件列表：切到插件视图时拉取。
+   *
+   * 加载态由 `loadPlugins` 内部维护（它由事件/连接触发），
+   * 不在 effect 里同步 setState，避免级联渲染。
+   */
+  useEffect(() => {
+    if (sideView !== "plugins") return;
+    let alive = true;
+    void fetchPlugins().then((r) => {
+      if (!alive) return;
+      setPluginList(r.plugins);
+      setPluginsLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [sideView]);
+
   // 字号：作用到根元素
   useEffect(() => {
     const px =
@@ -273,15 +304,25 @@ export default function Home() {
     document.documentElement.style.fontSize = px;
   }, [settings.fontSize]);
 
-  // 主题标记（当前视觉以深色为主，保留标记供后续扩展）
+  /**
+   * 主题切换：直接切换 `<html>` 上的 `dark` 类。
+   *
+   * globals.css 里所有颜色都是 CSS 变量，浅色定义在 :root、
+   * 深色定义在 html.dark，因此这里只要挂/摘类名即可全局生效。
+   * 「跟随系统」时监听系统主题变化，实时同步。
+   */
   useEffect(() => {
-    const resolved =
-      settings.theme === "system"
-        ? window.matchMedia("(prefers-color-scheme: light)").matches
-          ? "light"
-          : "dark"
-        : settings.theme;
-    document.documentElement.dataset.theme = resolved;
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark =
+        settings.theme === "system" ? media.matches : settings.theme === "dark";
+      document.documentElement.classList.toggle("dark", dark);
+      document.documentElement.style.colorScheme = dark ? "dark" : "light";
+    };
+    apply();
+    if (settings.theme !== "system") return;
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
   }, [settings.theme]);
 
   const active = useMemo(
@@ -513,12 +554,6 @@ export default function Home() {
 
   const messages = active?.messages ?? [];
   const modelName = serverCfg?.model ?? "deepseek-chat";
-  const presetLabel =
-    settings.agentPreset === "standard"
-      ? "标准模式"
-      : settings.agentPreset === "minimal"
-        ? "极简模式"
-        : "创造模式";
 
   // 模型下拉选项：当前模型置顶，其余为常见备选
   const modelOptions = [
@@ -551,36 +586,149 @@ export default function Home() {
               </button>
             </div>
 
-            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
-              <div className="px-2 pb-1 text-[11px] text-ink-caption">lish</div>
-              {sessions.length === 0 ? (
-                <div className="px-2 py-3 text-[12px] text-ink-caption">暂无会话</div>
-              ) : (
-                sessions.map((s) => (
-                  <div
-                    key={s.id}
-                    onClick={() => setActiveId(s.id)}
-                    className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] transition-colors ${
-                      s.id === activeId
+            {/* 侧边栏视图切换：会话 / 插件 / 自动化任务 */}
+            <nav className="space-y-0.5 px-2 pb-1">
+              {(
+                [
+                  { id: "sessions", label: "会话", icon: MessageSquarePlus },
+                  { id: "plugins", label: "插件", icon: Puzzle },
+                  { id: "tasks", label: "自动化任务", icon: Bot },
+                ] as const
+              ).map((item) => {
+                const Icon = item.icon;
+                const on = sideView === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setSideView(item.id)}
+                    aria-current={on ? "page" : undefined}
+                    className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] transition-colors ${
+                      on
                         ? "bg-white/[0.08] text-ink"
                         : "text-ink-3 hover:bg-white/[0.04] hover:text-ink-2"
                     }`}
                   >
-                    <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                    <Icon size={13} />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </nav>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-1">
+              {sideView === "sessions" ? (
+                <>
+                  <div className="px-2 pb-1 text-[11px] text-ink-caption">
+                    最近会话
+                  </div>
+                  {sessions.length === 0 ? (
+                    <div className="px-2 py-3 text-[12px] text-ink-caption">
+                      暂无会话
+                    </div>
+                  ) : (
+                    sessions.map((s) => (
+                      <div
+                        key={s.id}
+                        onClick={() => {
+                          setActiveId(s.id);
+                          setMainTab("chat");
+                        }}
+                        className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] transition-colors ${
+                          s.id === activeId
+                            ? "bg-white/[0.08] text-ink"
+                            : "text-ink-3 hover:bg-white/[0.04] hover:text-ink-2"
+                        }`}
+                      >
+                        <span className="min-w-0 flex-1 truncate">{s.title}</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            removeSession(s.id);
+                          }}
+                          className="hidden shrink-0 rounded p-0.5 text-ink-caption hover:text-red-400 group-hover:block"
+                          aria-label="删除会话"
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </>
+              ) : null}
+
+              {sideView === "plugins" ? (
+                <>
+                  <div className="flex items-center justify-between px-2 pb-1">
+                    <span className="text-[11px] text-ink-caption">
+                      已加载 {pluginList.length} 个
+                    </span>
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        removeSession(s.id);
+                      onClick={() => {
+                        setPluginsLoading(true);
+                        void reloadPlugins().then((r) => {
+                          setPluginList(r.plugins);
+                          setPluginsLoading(false);
+                        });
                       }}
-                      className="hidden shrink-0 rounded p-0.5 text-ink-caption hover:text-red-400 group-hover:block"
-                      aria-label="删除会话"
+                      className="rounded p-0.5 text-ink-caption transition-colors hover:text-brand"
+                      aria-label="重新加载插件"
                     >
-                      <Trash2 size={12} />
+                      <ChevronRight
+                        size={12}
+                        className={pluginsLoading ? "animate-pulse" : ""}
+                      />
                     </button>
                   </div>
-                ))
-              )}
+                  {pluginList.length === 0 ? (
+                    <div className="px-2 py-3 text-[12px] leading-relaxed text-ink-caption">
+                      {pluginsLoading ? "加载中…" : "暂无插件"}
+                      <br />
+                      把 `.ts` 插件放进 `~/.lish/plugins/` 即会自动加载。
+                    </div>
+                  ) : (
+                    pluginList.map((p) => (
+                      <div
+                        key={p.id}
+                        className="flex items-center gap-2 rounded-md px-2 py-1.5 text-[12.5px] text-ink-3"
+                        title={p.error ?? p.module}
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                            p.status === "loaded"
+                              ? "bg-emerald-500"
+                              : p.status === "error"
+                                ? "bg-red-500"
+                                : "bg-ink-caption"
+                          }`}
+                        />
+                        <span className="min-w-0 flex-1 truncate text-ink-2">
+                          {p.name}
+                        </span>
+                        {p.version ? (
+                          <span className="shrink-0 text-[10px] text-ink-caption">
+                            v{p.version}
+                          </span>
+                        ) : null}
+                      </div>
+                    ))
+                  )}
+                </>
+              ) : null}
+
+              {sideView === "tasks" ? (
+                <div className="px-2 py-3 text-[12px] leading-relaxed text-ink-caption">
+                  当前版本尚未内置定时/触发式任务调度。
+                  <br />
+                  需要按计划自动执行时，请用系统 cron 调用
+                  <code className="mx-1 rounded bg-white/5 px-1 text-ink-3">
+                    lish web
+                  </code>
+                  提供的 HTTP 接口。
+                </div>
+              ) : null}
             </div>
 
             <div className="border-t border-line p-2">
@@ -603,11 +751,11 @@ export default function Home() {
         <Panel minSize="40%">
           <main className="flex h-full min-w-0 flex-col">
             {/* 状态栏 */}
-            <div className="flex h-11 shrink-0 items-center gap-3 border-b border-line px-4">
+            <div className="flex h-11 shrink-0 items-center gap-2 border-b border-line px-2 sm:gap-3 sm:px-4">
               <span className="min-w-0 truncate text-[13px] text-ink-2">
                 {active?.title ?? "新会话"}
               </span>
-              <span className="flex shrink-0 items-center gap-1 rounded border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-caption">
+              <span className="hidden shrink-0 items-center gap-1 rounded border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-caption sm:flex">
                 <Users size={11} />
                 子智能体 {subAgents.length} 个
                 {subAgents.filter((a) => a.status === "running").length > 0 ? (
@@ -678,9 +826,13 @@ export default function Home() {
                       <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand text-[17px] font-bold text-white">
                         l
                       </div>
-                      <p className="mt-1 text-[15px] text-ink-2">有什么可以帮你？</p>
-                      <p className="max-w-sm text-[12px] text-ink-caption">
-                        可以让我读写工作区文件，例如「读取 package.json 并告诉我项目名字」
+                      <p className="mt-1 text-[15px] text-ink-2">
+                        你好，我是 lish —— 你的本地智能体内核。
+                      </p>
+                      <p className="max-w-md text-[12px] leading-relaxed text-ink-caption">
+                        我直接在你的工作区里读写文件、执行命令，所有步骤都会记录成可回放的轨迹。
+                        <br />
+                        试试：「读一下 package.json，告诉我这个项目是做什么的」
                       </p>
                     </div>
                   ) : (
@@ -693,6 +845,18 @@ export default function Home() {
             {/* 输入区 */}
             <div className="shrink-0 px-3 pb-3 sm:px-4 sm:pb-4">
               <div className="mx-auto w-full max-w-[860px]">
+                {serverCfg && !serverCfg.hasApiKey ? (
+                  <div
+                    role="alert"
+                    className="mb-2 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-[12px] leading-relaxed text-red-400"
+                  >
+                    <span aria-hidden className="mt-[1px]">⚠️</span>
+                    <span className="min-w-0 flex-1">
+                      未检测到 API Key，对话将无法工作。请点击左下角【设置】填写您的 API Key
+                      和模型。
+                    </span>
+                  </div>
+                ) : null}
                 <div className="rounded-2xl border border-line-strong bg-layer1 shadow-[0_6px_28px_-6px_rgba(0,0,0,0.5)] transition-colors focus-within:border-brand">
                   <textarea
                     ref={textareaRef}
@@ -703,7 +867,7 @@ export default function Home() {
                     placeholder="给智能体发消息…（Enter 发送，Shift+Enter 换行）"
                     className="max-h-40 w-full resize-none bg-transparent px-4 pb-1 pt-3 text-[13px] leading-relaxed text-ink outline-none placeholder:text-ink-caption"
                   />
-                  <div className="flex items-center gap-2 px-3 pb-2.5">
+                  <div className="flex flex-wrap items-center gap-1.5 px-2 pb-2.5 sm:gap-2 sm:px-3">
                     {/* 左：+ */}
                     <button
                       type="button"
@@ -728,7 +892,7 @@ export default function Home() {
                     />
 
                     {/* 右：模型选择器 + 发送 */}
-                    <div className="ml-auto flex items-center gap-2">
+                    <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
                       <Select
                         value={modelName}
                         onChange={(v) =>

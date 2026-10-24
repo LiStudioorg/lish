@@ -76,6 +76,30 @@ function flattenPayload(payload: unknown): ToolStreamEvent[] {
   return [];
 }
 
+/**
+ * 统一的后端调用助手。
+ *
+ * 本项目所有 `/api/*` 端点都走 **POST + JSON body**（RPC 风格）：
+ * 动作由路径表达，参数由请求体承载。网关/代理/前端封装只需处理一种方法，
+ * 也避免了 GET 查询串的编码与长度限制。
+ */
+async function postJson<T>(
+  path: string,
+  body?: Record<string, unknown>,
+): Promise<{ ok: boolean; data: T | null; status: number }> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+    });
+    const data = (await res.json().catch(() => null)) as T | null;
+    return { ok: res.ok, data, status: res.status };
+  } catch {
+    return { ok: false, data: null, status: 0 };
+  }
+}
+
 export interface ChatCallbacks {
   onText: (delta: string) => void;
   onEvent: (event: ToolStreamEvent) => void;
@@ -162,6 +186,16 @@ export function streamChat(
 
 // --- 配置接口 -------------------------------------------------------------
 
+/** 提供商（密钥已脱敏）。 */
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  baseURL: string;
+  model: string;
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+}
+
 export interface ServerConfig {
   baseURL: string;
   model: string;
@@ -171,16 +205,115 @@ export interface ServerConfig {
   hasApiKey: boolean;
   providerName: string;
   tools: string[];
+  providers?: ProviderInfo[];
+  activeProviderId?: string;
+}
+
+/** 提供商增删改的返回体（三个写接口结构一致）。 */
+export interface ProvidersResult {
+  ok: boolean;
+  providers: ProviderInfo[];
+  activeProviderId?: string;
+  error?: string;
+}
+
+async function providerRequest(
+  path: string,
+  init?: RequestInit,
+): Promise<ProvidersResult> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, init);
+    const data = (await res.json().catch(() => ({}))) as Partial<ProvidersResult> & {
+      error?: string;
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        providers: data.providers ?? [],
+        activeProviderId: data.activeProviderId,
+        error: data.error ?? `HTTP ${res.status}`,
+      };
+    }
+    return {
+      ok: true,
+      providers: data.providers ?? [],
+      activeProviderId: data.activeProviderId,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      providers: [],
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/** 新增或更新提供商；带 id 即更新，apiKey 为空表示不改密钥。 */
+export function saveProvider(input: {
+  id?: string;
+  name?: string;
+  baseURL?: string;
+  apiKey?: string;
+  model?: string;
+}): Promise<ProvidersResult> {
+  return providerRequest("/api/providers", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  });
+}
+
+/** 删除提供商（写操作统一 POST）。 */
+export function deleteProvider(id: string): Promise<ProvidersResult> {
+  return providerRequest("/api/providers/delete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
+}
+
+/** 切换激活的提供商（热生效）。 */
+export function activateProvider(id: string): Promise<ProvidersResult> {
+  return providerRequest("/api/providers/activate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id }),
+  });
 }
 
 export async function fetchConfig(): Promise<ServerConfig | null> {
-  try {
-    const res = await fetch(`${API_BASE}/api/config`);
-    if (!res.ok) return null;
-    return (await res.json()) as ServerConfig;
-  } catch {
-    return null;
+  const r = await postJson<ServerConfig>("/api/config/get");
+  return r.ok ? r.data : null;
+}
+
+/**
+ * 拉取服务端可用模型列表。
+ *
+ * 失败时返回 `{ ok: false, error }`，调用方据此把模型输入框降级为手工输入，
+ * 并提示「获取失败，请手动输入模型名」。
+ */
+export async function fetchModels(
+  baseUrl?: string,
+  apiKey?: string,
+): Promise<{ ok: boolean; models: string[]; error?: string }> {
+  const r = await postJson<{ models?: unknown; error?: string }>("/api/models", {
+    ...(baseUrl?.trim() ? { baseUrl: baseUrl.trim() } : {}),
+    ...(apiKey?.trim() ? { apiKey: apiKey.trim() } : {}),
+  });
+  if (!r.ok) {
+    return {
+      ok: false,
+      models: [],
+      error: r.data?.error ?? `HTTP ${r.status}`,
+    };
   }
+  const models = Array.isArray(r.data?.models)
+    ? r.data.models.filter((m): m is string => typeof m === "string")
+    : [];
+  if (models.length === 0) {
+    return { ok: false, models: [], error: "服务端未返回任何模型" };
+  }
+  return { ok: true, models };
 }
 
 export interface ConfigPatch {
@@ -262,7 +395,11 @@ export interface FileNode {
 
 export async function fetchFileTree(): Promise<{ ok: boolean; tree?: FileNode; root?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/api/files`);
+    const res = await fetch(`${API_BASE}/api/files`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     if (!res.ok) return { ok: false };
     const data = (await res.json()) as { ok: boolean; tree: FileNode; root: string };
     return { ok: data.ok, tree: data.tree, root: data.root };
@@ -275,7 +412,11 @@ export async function fetchFileContent(
   path: string,
 ): Promise<{ ok: boolean; content?: string; error?: string }> {
   try {
-    const res = await fetch(`${API_BASE}/api/files/content?path=${encodeURIComponent(path)}`);
+    const res = await fetch(`${API_BASE}/api/files/content`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
     const data = (await res.json().catch(() => ({}))) as {
       ok?: boolean;
       content?: string;
@@ -333,7 +474,11 @@ export interface PluginInfo {
 
 export async function fetchPlugins(): Promise<{ ok: boolean; plugins: PluginInfo[] }> {
   try {
-    const res = await fetch(`${API_BASE}/api/plugins`);
+    const res = await fetch(`${API_BASE}/api/plugins`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     if (!res.ok) return { ok: false, plugins: [] };
     const data = (await res.json()) as { ok: boolean; plugins: PluginInfo[] };
     return { ok: data.ok, plugins: data.plugins ?? [] };
@@ -409,9 +554,11 @@ export async function fetchTraceEvents(sessionId: string): Promise<{
 }> {
   if (!sessionId) return { ok: false, events: [] };
   try {
-    const res = await fetch(
-      `${API_BASE}/api/session/${encodeURIComponent(sessionId)}/events`,
-    );
+    const res = await fetch(`${API_BASE}/api/session/events`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId }),
+    });
     const data = (await res.json().catch(() => ({}))) as {
       ok?: boolean;
       events?: TraceEvent[];
@@ -445,7 +592,11 @@ export async function fetchSubAgents(): Promise<{
   agents: SubAgentRecord[];
 }> {
   try {
-    const res = await fetch(`${API_BASE}/api/subagents`);
+    const res = await fetch(`${API_BASE}/api/subagents`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
     if (!res.ok) return { ok: false, running: 0, total: 0, agents: [] };
     const d = (await res.json()) as {
       ok: boolean;

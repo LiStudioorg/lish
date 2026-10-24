@@ -216,6 +216,7 @@ export function RightPanel() {
   const lineId = useRef(0);
   const termRef = useRef<HTMLDivElement>(null);
 
+  /** 拉取文件树；由「文件」Tab 的点击事件触发（不在 effect 内调用）。 */
   const loadTree = useCallback(async () => {
     setLoadingTree(true);
     setTreeError(undefined);
@@ -225,10 +226,7 @@ export function RightPanel() {
     else setTreeError("加载文件树失败");
   }, []);
 
-  useEffect(() => {
-    if (tab === "files" && !tree && !loadingTree) void loadTree();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+
 
   const openFile = useCallback(async (path: string) => {
     setPreview({ path, content: "" });
@@ -301,7 +299,11 @@ export function RightPanel() {
           <button
             key={t.id}
             type="button"
-            onClick={() => setTab(t.id)}
+            onClick={() => {
+              setTab(t.id);
+              // 文件树按需加载：在用户交互回调里发起，避免 effect 内同步 setState
+              if (t.id === "files" && !tree && !loadingTree) void loadTree();
+            }}
             className={`rounded px-2.5 py-1 text-[12px] transition-colors ${
               tab === t.id
                 ? "bg-white/[0.08] text-ink"
