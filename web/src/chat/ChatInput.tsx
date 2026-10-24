@@ -161,7 +161,7 @@ export function ChatInput({ sessionId, placeholder }: ChatInputProps) {
   )
 }
 
-/* 与后端对接的真实流式处理 */
+/* 对接后端 /api/chat 的真实流式处理 */
 function startStreaming(sessionId: string, userText: string) {
   const assistantMsg = {
     id: `msg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -174,10 +174,10 @@ function startStreaming(sessionId: string, userText: string) {
   store.addMessage(sessionId, assistantMsg)
   store.setStreaming(true, assistantMsg.id)
 
-  // 工具事件按 callId 去重：先建卡片，结果回来后再更新同一张卡片
+  // 工具事件按 callId 配对：先建卡片，结果返回后更新同一张
   const toolIndex = new Map<string, number>()
 
-  // 文本增量缓冲：按动画帧合并写入，避免每个 token 都触发一次全量重渲染。
+  // 文本增量缓冲：合并到一帧写入，避免每个 token 触发一次全量重渲染
   let pendingText = ''
   let flushHandle: number | null = null
 
@@ -197,9 +197,16 @@ function startStreaming(sessionId: string, userText: string) {
   function appendText(delta: string) {
     pendingText += delta
     if (flushHandle === null) {
-      // requestAnimationFrame 在标签页不可见时会暂停，这里用 setTimeout 兜底。
       flushHandle = window.setTimeout(flushText, 16)
     }
+  }
+
+  function cancelFlush() {
+    if (flushHandle !== null) {
+      clearTimeout(flushHandle)
+      flushHandle = null
+    }
+    flushText()
   }
 
   function handleEvent(event: ToolStreamEvent) {
@@ -231,8 +238,6 @@ function startStreaming(sessionId: string, userText: string) {
       const index = toolIndex.get(callId)
       const target = index !== undefined ? calls[index] : calls.find(c => c.id === callId)
       if (target) {
-        // store 的 ToolCall 用 output 字段承载结果文本；
-        // 失败时加前缀标记，让卡片能区分「成功 / 失败」。
         const output = event.isError
           ? `✗ ${event.content ?? ''}`
           : (event.content ?? '')
@@ -240,7 +245,6 @@ function startStreaming(sessionId: string, userText: string) {
           toolCalls: calls.map(c => (c === target ? { ...c, output } : c)),
         })
       }
-      return
     }
   }
 
@@ -248,11 +252,7 @@ function startStreaming(sessionId: string, userText: string) {
     onText: appendText,
     onEvent: handleEvent,
     onDone: info => {
-      if (flushHandle !== null) {
-        clearTimeout(flushHandle)
-        flushHandle = null
-      }
-      flushText()
+      cancelFlush()
       const session = store.sessions.find(s => s.id === sessionId)
       const msg = session?.messages.find(m => m.id === assistantMsg.id)
       store.updateMessage(sessionId, assistantMsg.id, {
@@ -265,11 +265,7 @@ function startStreaming(sessionId: string, userText: string) {
       store.setStreaming(false)
     },
     onError: err => {
-      if (flushHandle !== null) {
-        clearTimeout(flushHandle)
-        flushHandle = null
-      }
-      flushText()
+      cancelFlush()
       store.updateMessage(sessionId, assistantMsg.id, {
         status: 'error' as const,
         content: `请求失败：${err.message}`,

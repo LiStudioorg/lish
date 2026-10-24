@@ -42,12 +42,9 @@ const WS_GROUPS: {
   live?: boolean
   examples?: string[]
 }[] = [
-  { id: 'copy', label: 'copy', examples: ['进度同步', 'Notes'] },
-  { id: 'machine-learning', label: 'machine-learning', examples: ['训练配置', '评估报告'] },
-  { id: 'rewrite-agently', label: 'rewrite-agently', expanded: true, live: true },
-  { id: 'use-deepseek-harness', label: 'use-deepseek-harness', examples: ['集成指南', 'HRH-notes'] },
-  { id: 'dsh-default', label: 'dsh-default', examples: ['示例对话'] },
-  { id: 'ungrouped', label: '未分组', examples: [] },
+  // 原脚手架的 copy / machine-learning / use-deepseek-harness 等为演示数据，
+  // 与本项目无关，已移除；只保留承载真实会话列表的 lish 工作区。
+  { id: 'lish', label: 'lish', expanded: true, live: true },
 ]
 
 interface SidebarProps {

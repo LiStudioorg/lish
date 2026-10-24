@@ -3237,3 +3237,83 @@ input, textarea { font-family: inherit; font-size: inherit; }
 .lc-br-tokens { color: var(--dsw-alias-label-secondary); }
 .lc-br-pct { width: 34px; text-align: right; color: var(--dsw-alias-label-tertiary); }
 .lc-foot { font-size: 11px; color: var(--dsw-alias-label-tertiary); padding: 0 2px; }
+
+/* ═══════════════════════════════════════════════════════════
+   响应式适配（原骨架未提供，这里仅补充媒体查询，不改任何结构）
+   ═══════════════════════════════════════════════════════════ */
+
+/*
+ * 窄屏（手机）：
+ *   - 隐藏右侧详情面板与左侧工作区栏，把宽度让给对话区，
+ *     否则聊天区被挤压到不可用、输入框会移出视口。
+ *   - 输入区固定在底部，保证始终可见。
+ */
+@media (max-width: 900px) {
+  .dsh-workspace-details {
+    display: none !important;
+  }
+  .dsh-workspace-resize {
+    display: none !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .dsh-workspace-sidebar {
+    display: none !important;
+  }
+  .dsh-workspace-main {
+    min-width: 0 !important;
+  }
+  .dsh-chat-messages {
+    padding: 12px 14px;
+  }
+  .dsh-chat-input-area {
+    padding: 0 10px 6px;
+  }
+  .dsh-chat-input-area .dsh-composer-card {
+    max-width: 100%;
+  }
+  .dsh-hero-title {
+    font-size: 28px;
+  }
+}
+
+/*
+ * 窄屏下的输入框底部工具栏。
+ *
+ * 原版该行包含：[+] [Workspace Write] …… [冻结会话][周末][模型][发送]，
+ * 元素总宽超过手机屏幕，导致文字被压成竖排、互相重叠。
+ * 这里让该行在窄屏换行，并隐藏纯装饰性标签（冻结会话/周末），
+ * 只保留「+ / 模型 / 发送」这三个真正可用的控件。
+ */
+@media (max-width: 640px) {
+  .dsh-composer-row {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+  .dsh-composer-freeze,
+  .dsh-composer-status {
+    display: none !important;
+  }
+  .dsh-composer-mode-label {
+    max-width: 92px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dsh-composer-model-name {
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* 防止任何子元素被压成竖排文字 */
+  .dsh-composer-tools,
+  .dsh-composer-trailing {
+    flex-wrap: nowrap;
+    min-width: 0;
+  }
+  .dsh-composer-trailing {
+    margin-left: auto;
+  }
+}
