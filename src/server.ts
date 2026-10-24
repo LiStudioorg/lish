@@ -39,15 +39,20 @@ const here = dirname(fileURLToPath(import.meta.url));
  * 定位前端构建产物目录（web/dist）。
  *
  * 需要兼容两种运行位置：
- *   - 源码运行（tsx src/server.ts）：<root>/src      -> <root>/web/dist
- *   - 编译运行（dist/src/server.js）：<root>/dist/src -> <root>/web/dist
+ *   - 源码运行（tsx src/server.ts）：<root>/src       -> <root>/web/out
+ *   - 编译运行（dist/src/server.js）：<root>/dist/src -> <root>/web/out
  * 因此逐级上溯查找，而不是写死相对层级。
+ *
+ * 前端已迁移到 Next.js 静态导出，产物目录固定为 web/out。
+ * 同时保留对旧目录 web/dist 的兼容，避免升级期的混乱。
  */
 export function resolveWebRoot(startDir: string = here): string | null {
   let dir = startDir;
   for (let depth = 0; depth < 5; depth++) {
-    const candidate = join(dir, "web", "dist");
-    if (existsSync(join(candidate, "index.html"))) return candidate;
+    for (const sub of ["out", "dist"]) {
+      const candidate = join(dir, "web", sub);
+      if (existsSync(join(candidate, "index.html"))) return candidate;
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
