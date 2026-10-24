@@ -24,7 +24,9 @@
     "build": "npm run build:web && npm run build:cli",
     "build:cli": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "start:dev": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\"",
-    "test:plugins": "tsx src/core/plugins/test-plugins.ts"
+    "test:plugins": "tsx src/core/plugins/test-plugins.ts",
+    "lint": "eslint src scripts examples",
+    "test:trace": "tsx src/core/test-trace.ts"
   },
   "repository": {
     "type": "git",
@@ -38,11 +40,16 @@
   },
   "homepage": "https://github.com/LiStudioorg/lish#readme",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^26.6.5",
     "@types/react": "^19.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.72.0",
+    "@typescript-eslint/parser": "^8.72.0",
     "concurrently": "^10.0.6",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "ts-node": "^10.9.2",
     "tsx": "^4.23.15",
     "typescript": "^5.9.3"

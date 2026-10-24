@@ -17,13 +17,13 @@ import { ToolRegistry } from "./core/tools.js";
 import { createFsTools } from "./tools/fs.js";
 import { createShellTool } from "./tools/shell.js";
 import {
-  DEFAULT_SETTINGS,
   loadSettings,
   saveSettings,
   mergeSettings,
   type AppSettings,
 } from "./core/settings.js";
 import { PluginLoader } from "./core/plugins/loader.js";
+import { TraceStore, type TraceEvent } from "./core/trace.js";
 import { PluginHotReloader } from "./core/plugins/hot-reload.js";
 import type { LoadedPluginInfo } from "./core/plugins/loader.js";
 import { existsSync } from "node:fs";
@@ -128,6 +128,8 @@ export interface Runtime {
   listPlugins(): LoadedPluginInfo[];
   /** 热重载指定插件（或全部）。 */
   reloadPlugins(id?: string): Promise<LoadedPluginInfo[]>;
+  /** 读取某会话的轨迹事件。 */
+  listTraceEvents(sessionId: string): TraceEvent[];
   /** 拆除运行时：冲洗会话日志并销毁内核。 */
   shutdown(): Promise<void>;
 }
@@ -238,8 +240,11 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
 
   syncTools();
 
+  // 轨迹存储：注入给 AgentLoop，核心只负责写事件
+  const traceStore = new TraceStore();
+
   // Agent 循环
-  const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps });
+  const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps, traceStore });
   ctx.provide(AgentLoop.KEY, agent);
 
   // --- 插件系统（Bundle / Patch / Loader + HMR）---
@@ -323,6 +328,9 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     workspaceRoot: config.workspaceRoot,
     listPlugins() {
       return loader.list();
+    },
+    listTraceEvents(sessionId: string) {
+      return traceStore.list(sessionId);
     },
     async reloadPlugins(id?: string) {
       if (id) {

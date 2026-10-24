@@ -31,7 +31,6 @@ import { Command, Option } from "commander";
 import {
   AGENT_ABORTED,
   AGENT_ANSWER,
-  AGENT_THINKING,
   AGENT_TOOL_CALL,
   AGENT_TOOL_RESULT,
 } from "./core/agent-loop.js";

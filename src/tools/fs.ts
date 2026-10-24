@@ -59,7 +59,7 @@ export interface FsToolsOptions {
 export async function resolveInsideWorkspace(
   root: string,
   input: string,
-  options: { allowMissingLeaf?: boolean } = {},
+  _options: { allowMissingLeaf?: boolean } = {},
 ): Promise<string> {
   if (typeof input !== "string" || input.length === 0) {
     throw new Error("Path must be a non-empty string");

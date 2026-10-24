@@ -37,11 +37,14 @@ import {
   streamChat,
   fetchConfig,
   updateAppSettings,
+  fetchTraceEvents,
+  type TraceEvent,
   type ServerConfig,
   type ToolStreamEvent,
   type AppSettings as ServerAppSettings,
 } from "../lib/api";
 import { RightPanel } from "../ui/RightPanel";
+import { TracePanel } from "../ui/TracePanel";
 import {
   SettingsModal,
   defaultSettings,
@@ -239,6 +242,10 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [serverCfg, setServerCfg] = useState<ServerConfig | null>(null);
+  /** 中间区 Tab：对话 / 轨迹 */
+  const [mainTab, setMainTab] = useState<"chat" | "trace">("chat");
+  /** 轨迹事件（与对话状态隔离，避免流式增量污染轨迹列表） */
+  const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -282,6 +289,13 @@ export default function Home() {
    * 更新设置：先更新本地状态（界面即时响应），再异步落到后端。
    * 后端会同时调整工具注册表（插件开关）与 fs 工具权限。
    */
+  /** 拉取当前会话的轨迹事件。 */
+  const loadTrace = useCallback(async (serverSessionId: string | undefined) => {
+    if (!serverSessionId) return;
+    const r = await fetchTraceEvents(serverSessionId);
+    if (r.ok) setTraceEvents(r.events);
+  }, []);
+
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
     void updateAppSettings(patch);
@@ -319,6 +333,13 @@ export default function Home() {
     },
     [activeId],
   );
+
+  // 切换会话：同步该会话的轨迹
+  useEffect(() => {
+    const sid = activeId ? serverSessionRef.current[activeId] : undefined;
+    if (sid) void loadTrace(sid);
+    else setTraceEvents([]);
+  }, [activeId, loadTrace]);
 
   // 自动滚动到底部
   useEffect(() => {
@@ -449,6 +470,8 @@ export default function Home() {
         }));
         setStreaming(false);
         abortRef.current = null;
+        // 轨迹只在事件边界刷新，避免与流式文本竞争渲染（状态隔离）
+        void loadTrace(serverSessionRef.current[sessionId]);
       },
       onError: (err) => {
         cancelFlush();
@@ -463,7 +486,7 @@ export default function Home() {
     });
 
     abortRef.current = handle.abort;
-  }, [input, streaming, activeId, patchSession, patchMessage]);
+  }, [input, streaming, activeId, patchSession, patchMessage, loadTrace]);
 
   const stop = useCallback(() => {
     abortRef.current?.();
@@ -598,8 +621,38 @@ export default function Home() {
               </button>
             </div>
 
+            {/* 对话 / 轨迹 双 Tab */}
+            <div className="flex h-8 shrink-0 items-center gap-0.5 border-b border-line px-3">
+              {(["chat", "trace"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  onClick={() => setMainTab(t)}
+                  className={`rounded px-2.5 py-0.5 text-[12px] transition-colors ${
+                    mainTab === t
+                      ? "bg-white/[0.08] text-ink"
+                      : "text-ink-caption hover:bg-white/[0.04] hover:text-ink-2"
+                  }`}
+                >
+                  {t === "chat" ? "对话" : "轨迹"}
+                  {t === "trace" && traceEvents.length > 0 ? (
+                    <span className="ml-1 text-[10px] text-ink-caption">{traceEvents.length}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+
+            {/* 轨迹面板 */}
+            {mainTab === "trace" ? (
+              <div className="min-h-0 flex-1 overflow-hidden">
+                <TracePanel events={traceEvents} />
+              </div>
+            ) : null}
+
             {/* 消息区：绝对定位滚动层，杜绝与输入框重叠 */}
-            <div className="relative flex min-h-0 flex-1 flex-col">
+            <div
+              className={`relative min-h-0 flex-1 flex-col ${mainTab === "chat" ? "flex" : "hidden"}`}
+            >
               <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
                 <div className="mx-auto flex min-h-full w-full max-w-[860px] flex-col gap-5 px-4 py-6">
                   {messages.length === 0 ? (

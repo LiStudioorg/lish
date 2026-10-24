@@ -53,11 +53,10 @@ export function runShell(command: string, options: RunShellOptions): Promise<She
     });
 
     /** 结束并返回，最多只生效一次。 */
-    let timer: NodeJS.Timeout | undefined;
     function finish(code: number | null) {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
+      clearTimeout(timer);
       resolve({
         command,
         stdout: stdout.slice(0, maxChars),
@@ -68,7 +67,7 @@ export function runShell(command: string, options: RunShellOptions): Promise<She
       });
     }
 
-    timer = setTimeout(() => {
+    const timer = setTimeout(() => {
       timedOut = true;
       // 杀掉整个进程组；再兜底等 300ms，避免 close 事件迟迟不来
       const pid = child.pid;

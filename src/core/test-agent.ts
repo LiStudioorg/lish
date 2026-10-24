@@ -19,12 +19,10 @@ import {
   AGENT_ABORTED,
   AGENT_COMPLETE,
   AgentLoop,
-  type AgentRunResult,
 } from "./agent-loop.js";
 import {
   LlmRuntime,
   MockProvider,
-  type GenerateOptions,
   type GenerateResult,
   type LlmProvider,
   type Message,

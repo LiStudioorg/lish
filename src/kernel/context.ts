@@ -50,11 +50,13 @@ export class Context {
   // --- EventBus 代理方法（便于插件直接写 ctx.on / ctx.emit）--------------
 
   /** 订阅事件，返回取消订阅函数。 */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 理由：事件总线处理异构载荷的必要边界
   on(event: string, listener: (...args: any[]) => any): () => void {
     return this.bus.on(event, listener);
   }
 
   /** 取消某个监听器。 */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 理由：事件总线处理异构载荷的必要边界
   off(event: string, listener: (...args: any[]) => any): void {
     this.bus.off(event, listener);
   }

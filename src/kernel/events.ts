@@ -5,7 +5,13 @@
  * 不再需要订阅时由调用方负责 `off` 或 `clear()`。
  */
 
-/** 通用监听器；各派发模式会给出更精确的签名。 */
+/**
+ * 通用监听器；各派发模式会给出更精确的签名。
+ *
+ * 这里的 any 是刻意保留的：事件总线承载异构载荷，
+ * 类似 DOM `addEventListener` 无法给出完美的泛型约束。
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- 理由：事件总线处理异构载荷的必要边界
 export type Listener = (...args: any[]) => any;
 
 /** `waterfall` 使用的监听器：接收当前值与 `next` 回调。 */

@@ -11,7 +11,6 @@
  */
 
 import assert from "node:assert/strict";
-import { createServer } from "node:http";
 
 import { Context } from "../kernel/context.js";
 import {
@@ -26,7 +25,7 @@ import {
   type AgentToolCallPayload,
   type AgentToolResultPayload,
 } from "./agent-loop.js";
-import { LlmRuntime, MockProvider, type Message } from "./llm.js";
+import { LlmRuntime, MockProvider } from "./llm.js";
 import { OpenAIProvider } from "./providers/openai.js";
 import { SessionService } from "./sessions.js";
 import { ToolRegistry } from "./tools.js";

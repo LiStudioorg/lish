@@ -362,3 +362,64 @@ export async function reloadPlugins(
     return { ok: false, plugins: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// --- 轨迹事件（Trace）-----------------------------------------------------
+
+export type TraceEventType =
+  | "run.start"
+  | "step.thinking"
+  | "stream.delta"
+  | "tool.call"
+  | "tool.result"
+  | "answer"
+  | "run.end"
+  | "error";
+
+export interface TokenUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  firstTokenMs?: number;
+  tokensPerSecond?: number;
+}
+
+export interface TraceEvent {
+  id: string;
+  traceId: string;
+  sessionId: string;
+  type: TraceEventType;
+  step: number;
+  timestamp: number;
+  duration: number;
+  title: string;
+  toolName?: string;
+  callId?: string;
+  args?: Record<string, unknown>;
+  result?: string;
+  isError?: boolean;
+  tokenUsage?: TokenUsage;
+  schema?: Record<string, unknown>;
+  rawPayload?: string;
+  error?: string;
+}
+
+export async function fetchTraceEvents(sessionId: string): Promise<{
+  ok: boolean;
+  events: TraceEvent[];
+  error?: string;
+}> {
+  if (!sessionId) return { ok: false, events: [] };
+  try {
+    const res = await fetch(
+      `${API_BASE}/api/session/${encodeURIComponent(sessionId)}/events`,
+    );
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      events?: TraceEvent[];
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, events: [], error: data.error ?? `HTTP ${res.status}` };
+    return { ok: true, events: data.events ?? [] };
+  } catch (err) {
+    return { ok: false, events: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}

@@ -216,7 +216,7 @@ export function parseOpenAIToolCalls(
   if (!raw || raw.length === 0) return [];
   return raw.map((call, index) => {
     const argsText = call.function?.arguments ?? "";
-    let parsed: Record<string, unknown> = {};
+    let parsed: Record<string, unknown>;
     try {
       const value = argsText.trim().length === 0 ? {} : JSON.parse(argsText);
       parsed =
@@ -224,6 +224,7 @@ export function parseOpenAIToolCalls(
           ? (value as Record<string, unknown>)
           : { value };
     } catch {
+      // 模型幻觉可能产出非法 JSON：降级保留原始串，交由上层决定如何处理
       parsed = { _rawArguments: argsText, _parseError: true };
     }
     return {

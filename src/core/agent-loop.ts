@@ -18,6 +18,7 @@ import {
   type ToolCall,
 } from "./llm.js";
 import { ToolBlockedError, ToolNotFoundError, ToolRegistry } from "./tools.js";
+import { TraceStore, newTraceId, type TraceEvent } from "./trace.js";
 
 export const AGENT_STEP = "agent:step";
 export const AGENT_COMPLETE = "agent:complete";
@@ -105,6 +106,8 @@ export interface AgentLoopOptions {
   generateOptions?: GenerateOptions;
   /** 是否把会话折叠成 API 规范形状（唯一一条置顶 system）。 */
   hoistSystem?: boolean;
+  /** 轨迹存储；省略时使用内部默认实例。 */
+  traceStore?: TraceStore;
 }
 
 export type AgentStopReason =
@@ -143,6 +146,8 @@ export class AgentLoop {
   static readonly KEY = "agent";
 
   private readonly ctx: Context;
+  /** 轨迹存储；由外部注入（默认全局单例），核心只负责写入事件。 */
+  private readonly traceStore: TraceStore;
   private readonly options: Required<
     Pick<AgentLoopOptions, "maxSteps" | "maxToolCalls" | "maxRepeatedCalls" | "hoistSystem">
   > &
@@ -150,6 +155,7 @@ export class AgentLoop {
 
   constructor(ctx: Context, options: AgentLoopOptions = {}) {
     this.ctx = ctx;
+    this.traceStore = options.traceStore ?? new TraceStore();
     this.options = {
       ...options,
       maxSteps: options.maxSteps ?? 8,
@@ -191,6 +197,25 @@ export class AgentLoop {
 
     // 每次 run 生成唯一 id，前端可据此区分并发/连续的多次运行。
     const runId = `run_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    // 轨迹链路标识（AGENTS.md 第 5 条）
+    const traceId = newTraceId();
+    const runStartedAt = Date.now();
+
+    const record = (e: Omit<TraceEvent, "id" | "traceId" | "sessionId" | "timestamp">) =>
+      this.traceStore.append({
+        traceId,
+        sessionId: session.id,
+        timestamp: Date.now(),
+        ...e,
+      });
+
+    record({
+      type: "run.start",
+      step: 0,
+      duration: 0,
+      title: "开始运行",
+      tokenUsage: {},
+    });
     const steps: AgentStepRecord[] = [];
     let toolCallsExecuted = 0;
     let stopReason: AgentStopReason = "stop";
@@ -215,11 +240,16 @@ export class AgentLoop {
           messageCount: messages.length,
         } satisfies AgentThinkingPayload);
 
+        const stepStartedAt = Date.now();
+        let firstTokenAt: number | undefined;
+
         const result = await this.llm.generate(messages, {
           tools: this.tools.schemas(),
           ...this.options.generateOptions,
           // 边生成边派发增量事件：这是打字机效果的数据来源。
           onTextDelta: (delta: string) => {
+            // 记录首个 token 的时间点，用于计算首 token 延迟
+            if (firstTokenAt === undefined) firstTokenAt = Date.now();
             this.ctx.emit(AGENT_STREAM_DELTA, {
               runId,
               sessionId: session.id,
@@ -228,6 +258,29 @@ export class AgentLoop {
             } satisfies AgentStreamDeltaPayload);
           },
         });
+
+        // 记录本轮模型调用的真实耗时与 token 用量
+        {
+          const stepDuration = Date.now() - stepStartedAt;
+          const usage = result.usage;
+          const outputTokens = usage?.outputTokens;
+          record({
+            type: "step.thinking",
+            step: step + 1,
+            duration: stepDuration,
+            title: `第 ${step + 1} 步 · 模型调用`,
+            tokenUsage: {
+              inputTokens: usage?.inputTokens,
+              outputTokens,
+              firstTokenMs:
+                firstTokenAt !== undefined ? firstTokenAt - stepStartedAt : undefined,
+              tokensPerSecond:
+                outputTokens && stepDuration > 0
+                  ? Number(((outputTokens / stepDuration) * 1000).toFixed(1))
+                  : undefined,
+            },
+          });
+        }
 
         // 2. 原样记录 assistant 本轮输出。
         const assistant = assistantMessageFrom(result);
@@ -283,6 +336,17 @@ export class AgentLoop {
             args: call.arguments,
           } satisfies AgentToolCallPayload);
 
+          record({
+            type: "tool.call",
+            step: step + 1,
+            duration: 0,
+            title: call.name,
+            toolName: call.name,
+            callId: call.id,
+            args: call.arguments,
+            schema: this.tools.get(call.name)?.parameters,
+          });
+
           const startedAt = Date.now();
           let content: string;
           let isError = false;
@@ -324,6 +388,17 @@ export class AgentLoop {
             isError,
             durationMs: Date.now() - startedAt,
           } satisfies AgentToolResultPayload);
+
+          record({
+            type: "tool.result",
+            step: step + 1,
+            duration: Date.now() - startedAt,
+            title: call.name,
+            toolName: call.name,
+            callId: call.id,
+            result: content,
+            isError,
+          });
         }
 
         if (step === this.options.maxSteps - 1) {
@@ -342,6 +417,25 @@ export class AgentLoop {
       stopReason,
       steps: steps.length,
       toolCallsExecuted,
+      ...(error ? { error } : {}),
+    });
+
+    // 记录收尾：answer 与 run.end 都必须落轨迹，保证时间轴完整可审计
+    record({
+      type: "answer",
+      step: steps.length,
+      duration: 0,
+      title: error ? "运行结束（异常）" : "最终回答",
+      result: text,
+      error,
+    });
+
+    record({
+      type: "run.end",
+      step: steps.length,
+      duration: Date.now() - runStartedAt,
+      title: "运行完成",
+      tokenUsage: {},
       ...(error ? { error } : {}),
     });
 

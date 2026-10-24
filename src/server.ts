@@ -24,7 +24,6 @@ import { createDataStreamResponse, type JSONValue } from "ai";
 
 import {
   AGENT_ABORTED,
-  AGENT_ANSWER,
   AGENT_STREAM_DELTA,
   AGENT_THINKING,
   AGENT_TOOL_CALL,
@@ -87,6 +86,35 @@ export interface ToolStreamEvent {
   messageCount?: number;
   stopReason?: string;
   error?: string;
+}
+
+/**
+ * 事件载荷的最小可用字段。
+ *
+ * 事件总线是异构载荷，这里用 unknown 接收后统一收窄，
+ * 避免在业务层散落 any（AGENTS.md 第 6 条）。
+ */
+interface EventPayloadShape {
+  runId?: string;
+  sessionId?: string;
+  step?: number;
+  callId?: string;
+  name?: string;
+  argsJson?: string;
+  args?: Record<string, unknown>;
+  content?: string;
+  isError?: boolean;
+  durationMs?: number;
+  messageCount?: number;
+  stopReason?: string;
+  error?: string;
+  delta?: string;
+}
+
+/** 把 unknown 收窄为可读取的事件载荷；非对象返回 null。 */
+function asEventPayload(value: unknown): EventPayloadShape | null {
+  if (!value || typeof value !== "object") return null;
+  return value as EventPayloadShape;
 }
 
 /** 创建 express 应用（不监听端口，便于测试）。 */
@@ -182,6 +210,34 @@ export function createApp(runtime: Runtime): express.Express {
       sessions: runtime.sessions.size,
       tools: runtime.tools.list(),
     });
+  });
+
+  /**
+   * 会话轨迹事件。
+   *
+   * 返回完整事件数组，每条包含 traceId、毫秒时间戳、真实耗时与 tokenUsage，
+   * 供前端轨迹面板渲染时间轴、条形图与详情。
+   */
+  app.get("/api/session/:id/events", (req, res) => {
+    const sessionId = String(req.params.id ?? "");
+    if (!sessionId) {
+      res.status(400).json({ ok: false, error: "缺少会话 id" });
+      return;
+    }
+    try {
+      const events = runtime.listTraceEvents(sessionId);
+      res.json({
+        ok: true,
+        sessionId,
+        count: events.length,
+        events,
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   /**
@@ -408,7 +464,7 @@ export function createApp(runtime: Runtime): express.Express {
         let runId: string | undefined;
         /** 是否收到过任何文本增量（决定是否需要兜底一次性写入）。 */
         let sawDelta = false;
-        const handlers: Array<[string, (payload: any) => void]> = [];
+        const handlers: Array<[string, (payload: unknown) => void]> = [];
 
         const cleanup = () => {
           for (const [name, handler] of handlers) runtime.ctx.off(name, handler);
@@ -420,8 +476,9 @@ export function createApp(runtime: Runtime): express.Express {
         res.once("close", cleanup);
 
         // 只转发本次 run 的事件，避免并发请求串台
-        const track = (name: string, build: (payload: any) => ToolStreamEvent | null) => {
-          const handler = (payload: any) => {
+        const track = (name: string, build: (payload: EventPayloadShape) => ToolStreamEvent | null) => {
+          const handler = (raw: unknown) => {
+            const payload = asEventPayload(raw);
             if (!payload?.runId) return;
             if (runId === undefined) runId = payload.runId;
             if (payload.runId !== runId) return;
@@ -436,7 +493,8 @@ export function createApp(runtime: Runtime): express.Express {
         // 文本增量：直接写 `0:` 文本帧，前端据此逐字渲染。
         // 注意这里**不经过** writeData（data 帧），因为 useChat/我们的解析器
         // 把 `0:` 当作正文流，才是打字机效果的正确通道。
-        const onDelta = (payload: any) => {
+        const onDelta = (raw: unknown) => {
+          const payload = asEventPayload(raw);
           if (!payload?.runId) return;
           if (runId === undefined) runId = payload.runId;
           if (payload.runId !== runId) return;
@@ -450,14 +508,14 @@ export function createApp(runtime: Runtime): express.Express {
 
         track(AGENT_THINKING, (p) => ({
           type: "thinking",
-          runId: p.runId,
+          runId: p.runId ?? "",
           step: p.step,
           messageCount: p.messageCount,
         }));
 
         track(AGENT_TOOL_CALL, (p) => ({
           type: "tool_call",
-          runId: p.runId,
+          runId: p.runId ?? "",
           step: p.step,
           callId: p.callId,
           name: p.name,
@@ -467,7 +525,7 @@ export function createApp(runtime: Runtime): express.Express {
 
         track(AGENT_TOOL_RESULT, (p) => ({
           type: "tool_result",
-          runId: p.runId,
+          runId: p.runId ?? "",
           step: p.step,
           callId: p.callId,
           name: p.name,
@@ -478,7 +536,7 @@ export function createApp(runtime: Runtime): express.Express {
 
         track(AGENT_ABORTED, (p) => ({
           type: "aborted",
-          runId: p.runId,
+          runId: p.runId ?? "",
           stopReason: p.stopReason,
           error: p.error,
         }));
@@ -586,7 +644,11 @@ function extractUserMessage(body: unknown): string {
     const parts = last.parts;
     if (Array.isArray(parts)) {
       const text = parts
-        .map((p: any) => (p?.type === "text" ? String(p.text ?? "") : ""))
+        .map((p: unknown) => {
+          if (!p || typeof p !== "object") return "";
+          const part = p as { type?: string; text?: unknown };
+          return part.type === "text" ? String(part.text ?? "") : "";
+        })
         .join("")
         .trim();
       if (text.length > 0) return text;
