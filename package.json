@@ -1,7 +1,7 @@
 {
   "name": "@listudioorg/lish",
-  "version": "0.1.0-alpha.1",
-  "description": "",
+  "version": "0.1.0-alpha.2",
+  "description": "面向智能体应用的微内核基础设施：事件溯源、插件热插拔、全链路可观测、路径沙箱",
   "main": "index.js",
   "type": "module",
   "bin": {
@@ -36,8 +36,18 @@
     "type": "git",
     "url": "git+https://github.com/LiStudioorg/lish.git"
   },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "agent",
+    "llm",
+    "micro-kernel",
+    "event-bus",
+    "plugin-system",
+    "event-sourcing",
+    "ai-agent",
+    "cli",
+    "typescript"
+  ],
+  "author": "lish contributors",
   "license": "Apache-2.0",
   "bugs": {
     "url": "https://github.com/LiStudioorg/lish/issues"

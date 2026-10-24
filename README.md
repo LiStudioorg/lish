@@ -10,7 +10,7 @@
 [![Node](https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg)](https://nodejs.org)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6.svg)](tsconfig.json)
 [![Tests](https://img.shields.io/badge/tests-234%20passed-success.svg)]()
-[![Version](https://img.shields.io/badge/version-0.1.0--alpha.1-orange.svg)](package.json)
+[![Version](https://img.shields.io/badge/version-0.1.0--alpha.2-orange.svg)](package.json)
 
 </div>
 
@@ -237,7 +237,7 @@ npx tsx src/cli.ts web # 仅后端，托管已构建的前端产物
 ### 验证安装
 
 ```bash
-lish --version                          # 期望输出 0.1.0-alpha.1
+lish --version                          # 期望输出 0.1.0-alpha.2
 lish web --port 3000                    # 启动服务
 curl http://localhost:3000/api/health   # 期望返回 {"ok":true,...}
 ```
@@ -246,11 +246,14 @@ curl http://localhost:3000/api/health   # 期望返回 {"ok":true,...}
 
 | 安装方式 | 状态 | 说明 |
 | --- | --- | --- |
+| **npm 已发布包** | ✅ **已发布并实测** | `@listudioorg/lish@0.1.0-alpha.2`，从官方源安装后启动正常 |
 | npm 本地源码目录 | ✅ 已实测 | 在 `/tmp` 下启动，页面与 API 均正常 |
 | pnpm 全局安装 | ✅ 已实测 | 同上 |
 | bun 全局安装 | ✅ 已实测 | 同上 |
 | Git 仓库地址 | ⚠️ 未端到端验证 | 流程与本地源码一致，本机因内存限制未跑完 |
-| npm 已发布包 | ⏳ 待发布 | 包名已就绪，尚未执行 `npm publish` |
+
+> 已发布版本：`0.1.0-alpha.2`（`latest`）。查看全部版本：
+> `npm view @listudioorg/lish versions`
 
 ---
 
