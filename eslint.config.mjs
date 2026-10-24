@@ -96,6 +96,23 @@ export default [
     },
   },
   {
+    // 构建脚本（.mjs）：Node ESM 环境，需要 process/console 全局
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: {
+        process: "readonly",
+        console: "readonly",
+        URL: "readonly",
+        __dirname: "readonly",
+      },
+    },
+    rules: {
+      "no-undef": "off",
+    },
+  },
+  {
     // 测试文件放宽：允许非空断言与较宽松的结构
     files: ["**/test*.ts", "**/*.test.ts"],
     rules: {

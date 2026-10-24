@@ -21,13 +21,17 @@
     "start": "tsx src/cli.ts",
     "start:web:api": "tsx src/server.ts",
     "build:web": "cd web && npm run build",
-    "build": "npm run build:web && npm run build:cli",
+    "build": "npm run build:web && npm run build:cli && npm run build:assets",
     "build:cli": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
     "start:dev": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\"",
     "test:plugins": "tsx src/core/plugins/test-plugins.ts",
     "lint": "eslint src scripts examples",
     "test:trace": "tsx src/core/test-trace.ts",
-    "test:subagent": "tsx src/core/test-subagent.ts"
+    "test:subagent": "tsx src/core/test-subagent.ts",
+    "build:assets": "node scripts/copy-web-assets.mjs",
+    "install:web": "cd web && npm install --no-audit --no-fund",
+    "prepare": "npm run install:root && npm run install:web && npm run build",
+    "install:root": "npm install --no-audit --no-fund --ignore-scripts"
   },
   "repository": {
     "type": "git",
@@ -67,7 +71,6 @@
   },
   "files": [
     "dist",
-    "web/dist",
     "README.md",
     "LICENSE"
   ]

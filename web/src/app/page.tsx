@@ -659,7 +659,11 @@ export default function Home() {
             {/* 轨迹面板 */}
             {mainTab === "trace" ? (
               <div className="min-h-0 flex-1 overflow-hidden">
-                <TracePanel events={traceEvents} />
+                <TracePanel
+                  events={traceEvents}
+                  subAgents={subAgents}
+                  onSelectSubAgent={(sid) => void loadTrace(sid)}
+                />
               </div>
             ) : null}
 

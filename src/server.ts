@@ -38,23 +38,41 @@ import type { AppSettings } from "./core/settings.js";
 const here = dirname(fileURLToPath(import.meta.url));
 
 /**
- * 定位前端构建产物目录（web/dist）。
+ * 定位前端构建产物目录（web/out）。
  *
- * 需要兼容两种运行位置：
- *   - 源码运行（tsx src/server.ts）：<root>/src       -> <root>/web/out
- *   - 编译运行（dist/src/server.js）：<root>/dist/src -> <root>/web/out
- * 因此逐级上溯查找，而不是写死相对层级。
+ * 必须以 `import.meta.url` 为锚点解析，**不能依赖 process.cwd()**：
+ * 全局安装后用户可能在任意目录执行 `lish web`，
+ * 相对路径查找会全部落空，导致前端 404 白屏。
  *
- * 前端已迁移到 Next.js 静态导出，产物目录固定为 web/out。
- * 同时保留对旧目录 web/dist 的兼容，避免升级期的混乱。
+ * 支持的运行形态：
+ *   1. 全局安装：<prefix>/lib/node_modules/lish/dist/server.js
+ *      → 前端在 <prefix>/lib/node_modules/lish/web/out
+ *   2. 源码运行：<repo>/src/server.ts → <repo>/web/out
+ *   3. 编译后本地运行：<repo>/dist/server.js → <repo>/web/out
+ *
+ * 做法：从本文件所在目录逐级上溯，每级都检查 `web/out` 与 `web/dist`，
+ * 命中第一个含 index.html 的目录即可。
  */
 export function resolveWebRoot(startDir: string = here): string | null {
+  /*
+   * 以 import.meta.url 为锚点逐级上溯。
+   *
+   * 注意 Node 会解析软链：`npm link` 时 import.meta.url 指向真实源码路径，
+   * 因此该方式天然兼容 link 场景；而 pnpm 的全局 store 路径较深
+   * （.../pnpm/global/<ver>/node_modules/lish/dist），故上溯到 12 级。
+   */
   let dir = startDir;
-  for (let depth = 0; depth < 5; depth++) {
+  for (let depth = 0; depth < 12; depth++) {
+    // 1) 发布包内布局：<pkg>/dist/web/index.html（build:assets 生成）
+    const packaged = join(dir, "web");
+    if (existsSync(join(packaged, "index.html"))) return packaged;
+
+    // 2) 开发仓库布局：<repo>/web/out 或 <repo>/web/dist
     for (const sub of ["out", "dist"]) {
       const candidate = join(dir, "web", sub);
       if (existsSync(join(candidate, "index.html"))) return candidate;
     }
+
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;

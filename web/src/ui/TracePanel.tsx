@@ -25,11 +25,12 @@ import {
   CheckCircle2,
   Clock,
   Sparkles,
+  Users,
   Wrench,
   XCircle,
 } from "lucide-react";
 
-import type { TraceEvent } from "../lib/api";
+import type { TraceEvent, SubAgentRecord } from "../lib/api";
 import { ErrorBoundary } from "./ErrorBoundary";
 
 // --- 工具函数 -------------------------------------------------------------
@@ -272,7 +273,17 @@ function DetailContent({ tab, event }: { tab: DetailTab; event: TraceEvent }) {
 
 // --- 主面板 ---------------------------------------------------------------
 
-export function TracePanel({ events }: { events: TraceEvent[] }) {
+export function TracePanel({
+  events,
+  subAgents = [],
+  onSelectSubAgent,
+}: {
+  events: TraceEvent[];
+  /** 当前运行中的子代理（用于分组展示与切换） */
+  subAgents?: SubAgentRecord[];
+  /** 切换查看某个子代理的轨迹 */
+  onSelectSubAgent?: (sessionId: string) => void;
+}) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("summary");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -309,6 +320,42 @@ export function TracePanel({ events }: { events: TraceEvent[] }) {
     <div className="flex h-full min-h-0">
       {/* 左：时间轴 */}
       <div className="flex w-[46%] min-w-0 flex-col border-r border-line">
+        {/* 子代理分组：点击可切换查看该子代理的独立轨迹 */}
+        {subAgents.length > 0 ? (
+          <div className="shrink-0 border-b border-line px-2 py-1.5">
+            <div className="mb-1 flex items-center gap-1.5 text-[10px] text-ink-caption">
+              <Users size={10} />
+              子智能体 {subAgents.length} 个
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {subAgents.map((a) => (
+                <button
+                  key={a.id}
+                  type="button"
+                  onClick={() => onSelectSubAgent?.(a.sessionId)}
+                  title={`${a.role} · ${a.task}`}
+                  className={`flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] transition-colors ${
+                    a.status === "running"
+                      ? "border-amber-800/70 text-amber-300 hover:bg-amber-500/10"
+                      : a.status === "error"
+                        ? "border-red-900/60 text-red-300 hover:bg-red-500/10"
+                        : "border-line-strong text-ink-3 hover:bg-white/[0.05] hover:text-ink-2"
+                  }`}
+                >
+                  {a.status === "running" ? (
+                    <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                  ) : a.status === "error" ? (
+                    <XCircle size={9} />
+                  ) : (
+                    <CheckCircle2 size={9} className="text-emerald-400" />
+                  )}
+                  <span className="max-w-[110px] truncate">{a.role}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {/* 微型耗时条形图 */}
         <div className="shrink-0 border-b border-line px-2 py-1.5">
           <div className="mb-1 flex items-center justify-between text-[10px] text-ink-caption">

@@ -8,18 +8,51 @@
 - **轨迹可观测**：每条事件携带 traceId、毫秒时间戳、耗时与 token 用量。
 - **三种前端**：Web UI（Next.js 静态导出）、终端 TUI（ink）、极简文本聊天。
 
-## 快速开始
+## 安装
+
+### 全局安装（推荐）
 
 ```bash
-# 安装依赖
-npm install
+# npm
+npm install -g lish
 
-# 构建（前端静态导出 + 后端编译）
-npm run build
+# pnpm
+pnpm add -g lish
 
-# 链接为全局命令
-npm link
+# bun
+bun add -g lish
 ```
+
+安装后即可在任意目录执行 `lish`。
+
+### 从源码运行
+
+```bash
+git clone <repo-url> lish
+cd lish
+npm install
+npm run build
+node dist/cli.js web
+```
+
+也可以在源码目录直接以开发模式运行（无需构建）：
+
+```bash
+npm run start:dev          # 后端 + Vite 前端热更新
+# 或
+npx tsx src/cli.ts web     # 仅后端，托管已构建的 front-end
+```
+
+### 验证安装
+
+```bash
+lish --version
+lish web --port 3000
+# 浏览器打开 http://localhost:3000
+```
+
+无论全局安装还是源码运行，前端静态资源都会从**包内自带**的
+`dist/web` 目录加载，不依赖当前工作目录。
 
 ## 使用
 

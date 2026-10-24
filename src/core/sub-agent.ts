@@ -15,6 +15,7 @@ import type { SessionService } from "./sessions.js";
 import { AgentLoop } from "./agent-loop.js";
 import type { ToolRegistry } from "./tools.js";
 import type { ToolDefinition } from "./tools.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 /** 子代理运行状态，供前端展示「子智能体 N 个」。 */
 export interface SubAgentRecord {
@@ -105,12 +106,29 @@ export interface SpawnAgentDeps {
   maxSteps?: number;
 }
 
-/** 深度计数在 Context 上的服务 key。 */
-const DEPTH_KEY = "agent:spawn-depth";
+/**
+ * 深度计数。
+ *
+ * 之前用 Context 上的全局单值（`ctx.provide`），
+ * 并发派生子代理时会因「key 已存在」而抛错或互相覆盖。
+ * 改为 AsyncLocalStorage：每条异步调用链拥有独立的深度，
+ * 天然支持并发派生，且无需手动回滚。
+ */
+const depthStorage = new AsyncLocalStorage<number>();
 
-/** 读取当前深度。 */
-function currentDepth(ctx: Context): number {
-  return ctx.has(DEPTH_KEY) ? ctx.resolve<number>(DEPTH_KEY) : 0;
+/** 读取当前异步上下文的嵌套深度。 */
+function currentDepth(): number {
+  return depthStorage.getStore() ?? 0;
+}
+
+/**
+ * 在指定的嵌套深度上下文中执行一段逻辑。
+ *
+ * 供测试与外部编排使用：传入 depth 后，期间发生的 spawn_agent
+ * 会认为自己处于该深度，从而验证深度保护。
+ */
+export function runInSpawnDepth<T>(depth: number, fn: () => T): T {
+  return depthStorage.run(depth, fn);
 }
 
 /**
@@ -151,7 +169,7 @@ export function createSpawnAgentTool(deps: SpawnAgentDeps): ToolDefinition {
       }
 
       // --- 深度保护：防止 A 调 B、B 调 A 的无限递归 ---
-      const depth = currentDepth(deps.ctx);
+      const depth = currentDepth();
       if (depth >= maxDepth) {
         throw new Error(
           `已达到最大嵌套深度（${maxDepth}），禁止继续派生；请直接完成该子任务`,
@@ -173,11 +191,6 @@ export function createSpawnAgentTool(deps: SpawnAgentDeps): ToolDefinition {
           : undefined,
       });
 
-      // 在子作用域内提升深度计数，结束后自动还原
-      const scoped = deps.ctx.scope(() => {
-        deps.ctx.provide(DEPTH_KEY, depth + 1);
-      });
-
       try {
         /*
          * 子代理使用独立的 AgentLoop 实例，但注入同一个 ctx / tools / traceStore，
@@ -187,11 +200,21 @@ export function createSpawnAgentTool(deps: SpawnAgentDeps): ToolDefinition {
           maxSteps: Math.min(maxSteps, deps.agent.maxSteps),
           traceStore: deps.agent.traceStoreForChild,
         });
-        const result = await childAgent.run(session, task);
+        // 在独立的异步上下文中运行，深度 +1；并发派生互不干扰
+        const result = await depthStorage.run(depth + 1, () =>
+          childAgent.run(session, task),
+        );
+
+        // 子代理独立 traceId：从其自身轨迹中取首条事件的 traceId
+        let childTraceId: string | undefined;
+        const childEvents = deps.agent.traceStoreForChild.list(session.id);
+        if (childEvents.length > 0) childTraceId = childEvents[0]?.traceId;
+
         deps.registry.update(record.id, {
           status: result.stopReason === "error" ? "error" : "done",
           finishedAt: Date.now(),
           sessionId: session.id,
+          ...(childTraceId ? { traceId: childTraceId } : {}),
           result: result.text,
           ...(result.error ? { error: result.error } : {}),
         });
@@ -221,9 +244,6 @@ export function createSpawnAgentTool(deps: SpawnAgentDeps): ToolDefinition {
           error: message,
         });
         throw err;
-      } finally {
-        // 无论成功失败，都必须回滚深度计数（AGENTS.md 第 1 条：副作用 100% 回收）
-        scoped.revert();
       }
     },
   };

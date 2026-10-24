@@ -72,8 +72,11 @@ test("子代理记录可被查询", async () => {
 
 test("超过最大嵌套深度时拒绝派生", async () => {
   const rt = await createRuntime(baseConfig());
-  rt.ctx.provide("agent:spawn-depth", 2);
-  const r = await rt.tools.executeTool("spawn_agent", { role: "x", task: "y" });
+  // 深度由 AsyncLocalStorage 管理，这里直接构造一个已达上限的异步上下文
+  const { runInSpawnDepth } = await import("./sub-agent.js");
+  const r = await runInSpawnDepth(2, () =>
+    rt.tools.executeTool("spawn_agent", { role: "x", task: "y" }),
+  );
   assert.equal(r.isError, true);
   assert.match(r.content, /最大嵌套深度/);
   await rt.shutdown();
@@ -86,10 +89,29 @@ test("缺少 role 或 task 时报错", async () => {
   await rt.shutdown();
 });
 
-test("深度计数在子代理结束后被回滚", async () => {
+test("并发派发多个子代理不冲突（AsyncLocalStorage 隔离）", async () => {
   const rt = await createRuntime(baseConfig());
-  await rt.tools.executeTool("spawn_agent", { role: "r", task: "t" });
-  assert.equal(rt.ctx.has("agent:spawn-depth"), false, "深度计数应已回滚");
+  const results = await Promise.all(
+    Array.from({ length: 4 }, (_, i) =>
+      rt.tools.executeTool("spawn_agent", { role: `角色${i}`, task: `任务${i}` }),
+    ),
+  );
+  assert.equal(results.every((r) => !r.isError), true, "并发派生应全部成功");
+  assert.equal(rt.listSubAgents().length, 4);
+
+  await rt.shutdown();
+});
+
+test("子代理记录带独立 traceId 且互不相同", async () => {
+  const rt = await createRuntime(baseConfig());
+  await rt.tools.executeTool("spawn_agent", { role: "a", task: "t1" });
+  await rt.tools.executeTool("spawn_agent", { role: "b", task: "t2" });
+
+  const list = rt.listSubAgents();
+  const ids = list.map((a) => a.traceId);
+  assert.equal(ids.every((t) => typeof t === "string" && t.length > 0), true);
+  assert.equal(new Set(ids).size, ids.length, "traceId 应互不相同");
+
   await rt.shutdown();
 });
 
