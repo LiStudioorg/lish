@@ -29,9 +29,7 @@
     "test:trace": "tsx src/core/test-trace.ts",
     "test:subagent": "tsx src/core/test-subagent.ts",
     "build:assets": "node scripts/copy-web-assets.mjs",
-    "install:web": "cd web && npm install --no-audit --no-fund",
-    "prepare": "node scripts/ensure-root-deps.mjs && npm run build:web:ci && npm run build:cli && npm run build:assets",
-    "install:root": "npm install --no-audit --no-fund --ignore-scripts",
+    "prepare": "npm run build:web:ci && npm run build:cli && npm run build:assets",
     "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build"
   },
   "repository": {
