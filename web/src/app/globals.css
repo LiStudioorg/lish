@@ -99,3 +99,36 @@ body {
     animation: none;
   }
 }
+
+/*
+ * 可拖拽分隔线（react-resizable-panels v4）。
+ *
+ * 组件库默认给分隔线打 data-separator 属性；
+ * 这里把宽度撑到 5px 做成可见的拖拽条，中间 1px 为白色高亮线，
+ * hover / 拖拽时变为主色，与 DSH 的视觉一致。
+ */
+[data-separator] {
+  width: 5px !important;
+  background: transparent;
+  position: relative;
+  cursor: col-resize;
+  flex: 0 0 auto;
+}
+
+[data-separator]::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: rgba(255, 255, 255, 0.1);
+  transition: background 0.15s ease, width 0.15s ease;
+}
+
+[data-separator]:hover::after,
+[data-separator][data-separator-active]::after {
+  background: var(--color-brand);
+  width: 2px;
+}
