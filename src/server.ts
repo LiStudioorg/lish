@@ -32,6 +32,9 @@ import {
 } from "./core/agent-loop.js";
 import type { Runtime, LlmConfigPatch, PublicConfig } from "./runtime.js";
 import { maskApiKey } from "./runtime.js";
+import { readFileTree } from "./tools/file-tree.js";
+import { runShell } from "./tools/shell.js";
+import type { AppSettings } from "./core/settings.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -182,6 +185,118 @@ export function createApp(runtime: Runtime): express.Express {
   });
 
   /**
+   * 插件列表。
+   *
+   * 返回每个插件的 id、名称、版本、状态（loaded/disabled/error）
+   * 以及加载耗时与错误信息，供设置面板展示。
+   */
+  app.get("/api/plugins", (_req, res) => {
+    try {
+      res.json({ ok: true, plugins: runtime.listPlugins() });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
+   * 热重载插件。
+   *
+   * body.id 指定单个插件；省略则重载全部。
+   */
+  app.post("/api/plugins/reload", async (req: Request, res: Response) => {
+    const id = typeof req.body?.id === "string" ? req.body.id : undefined;
+    try {
+      const plugins = await runtime.reloadPlugins(id);
+      res.json({ ok: true, plugins });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
+   * 工作区文件树。
+   *
+   * 只读、限定 3 层深度、跳过 node_modules/.git 等重量级目录，
+   * 因此在大仓库里也不会卡住。
+   */
+  app.get("/api/files", async (_req, res) => {
+    try {
+      const tree = await readFileTree(runtime.workspaceRoot, 3);
+      res.json({ ok: true, root: runtime.workspaceRoot, tree });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
+   * 读取单个文件内容（供预览面板使用）。
+   *
+   * 复用文件系统工具的权限判定：workspace 模式下禁止越界读取。
+   */
+  app.get("/api/files/content", async (req, res) => {
+    const rel = typeof req.query.path === "string" ? req.query.path : "";
+    if (!rel) {
+      res.status(400).json({ ok: false, error: "缺少 path 参数" });
+      return;
+    }
+    try {
+      const tool = runtime.tools.get("fs.read");
+      if (!tool) {
+        res.status(403).json({ ok: false, error: "文件系统工具已被禁用" });
+        return;
+      }
+      const outcome = await runtime.tools.executeTool("fs.read", { path: rel });
+      if (outcome.isError) {
+        res.status(400).json({ ok: false, error: outcome.content });
+        return;
+      }
+      res.json({ ok: true, path: rel, content: outcome.content });
+    } catch (err) {
+      res.status(400).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
+   * 执行一条 shell 命令（终端面板）。
+   *
+   * 5 秒超时强制终止，输出长度受限。
+   */
+  app.post("/api/exec", async (req: Request, res: Response) => {
+    const command = typeof req.body?.command === "string" ? req.body.command.trim() : "";
+    if (!command) {
+      res.status(400).json({ ok: false, error: "命令不能为空" });
+      return;
+    }
+    const settings = runtime.getSettings();
+    if (!settings.plugins.shell) {
+      res.status(403).json({ ok: false, error: "终端插件已在设置中关闭" });
+      return;
+    }
+
+    try {
+      const result = await runShell(command, { cwd: runtime.workspaceRoot, timeoutMs: 5000 });
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
    * 读取当前 LLM 配置。
    * API Key 一律脱敏后返回——前端只需要知道「有没有配」，
    * 绝不下发完整密钥（避免出现在浏览器历史、日志、截图中）。
@@ -198,7 +313,8 @@ export function createApp(runtime: Runtime): express.Express {
       providerName: runtime.llm.providerName ?? "none",
       tools: runtime.tools.list(),
     };
-    res.json(view);
+    // 同时下发应用配置（权限 / 插件 / 外观），前端据此渲染并保持双向一致
+    res.json({ ...view, settings: runtime.getSettings() });
   });
 
   /**
@@ -209,8 +325,14 @@ export function createApp(runtime: Runtime): express.Express {
    *   - apiKey 传空串表示「不修改」，避免前端把脱敏值回写导致密钥被覆盖；
    *   - 请求体大小已由 express.json 限制。
    */
-  app.post("/api/config", (req: Request, res: Response) => {
+  app.post("/api/config", async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as Record<string, unknown>;
+
+    // --- 应用配置（权限 / 插件开关 / 外观）---
+    const settingsPatch = body.settings as Partial<AppSettings> | undefined;
+    if (settingsPatch && typeof settingsPatch === "object") {
+      await runtime.updateSettings(settingsPatch);
+    }
 
     const patch: LlmConfigPatch = {};
     if (typeof body.apiKey === "string" && body.apiKey.trim().length > 0) {
@@ -221,7 +343,14 @@ export function createApp(runtime: Runtime): express.Express {
     if (typeof body.maxSteps === "number") patch.maxSteps = body.maxSteps;
 
     if (Object.keys(patch).length === 0) {
-      res.status(400).json({ error: "没有可更新的字段（apiKey / baseURL / model / maxSteps）" });
+      if (settingsPatch) {
+        // 仅更新了应用配置，直接返回最新状态
+        res.json({ ok: true, settings: runtime.getSettings(), tools: runtime.tools.list() });
+        return;
+      }
+      res.status(400).json({
+        error: "没有可更新的字段（apiKey / baseURL / model / maxSteps / settings）",
+      });
       return;
     }
 
@@ -248,6 +377,8 @@ export function createApp(runtime: Runtime): express.Express {
         hasApiKey: cfg.apiKey.length > 0,
         providerName: runtime.llm.providerName ?? "none",
       } satisfies Partial<PublicConfig>,
+      settings: runtime.getSettings(),
+      tools: runtime.tools.list(),
     });
   });
 
@@ -538,7 +669,7 @@ const entry = process.argv[1] ?? "";
 if (/[\\/]server\.(ts|js)$/.test(entry)) {
   const { createRuntime, readConfig, UsageError } = await import("./runtime.js");
   try {
-    const runtime = createRuntime(readConfig());
+    const runtime = await createRuntime(readConfig());
     const port = Number(process.env.PORT ?? 3000);
     const code = await startServer(runtime, {
       port: Number.isInteger(port) ? port : 3000,

@@ -105,6 +105,52 @@ export class Context {
     return service;
   }
 
+  /**
+   * 以「局部作用域」形式执行一段代码，返回其登记的所有清理行为。
+   *
+   * 用途：插件卸载时需要撤销自己登记的服务与监听器，
+   * 但不想影响其它插件。这里通过临时替换内部记录表实现隔离：
+   * 块内 provide/effect 产生的登记会被收集，调用返回的函数即可整体回滚。
+   */
+  scope<T>(fn: () => T): { result: T; revert: () => void } {
+    this.assertAlive();
+
+    const createdServices: ServiceKey[] = [];
+    const createdDisposers: Disposer[] = [];
+
+    // 记录此期间新增的服务 key 与 disposer，便于精确回滚
+    const servicesBefore = new Set(this.services.keys());
+    const disposersLenBefore = this.disposers.length;
+
+    const result = fn();
+
+    for (const key of this.services.keys()) {
+      if (!servicesBefore.has(key)) createdServices.push(key);
+    }
+    for (let i = disposersLenBefore; i < this.disposers.length; i++) {
+      const d = this.disposers[i];
+      if (d) createdDisposers.push(d);
+    }
+
+    return {
+      result,
+      revert: () => {
+        // 逆序执行本作用域登记的清理函数
+        for (let i = createdDisposers.length - 1; i >= 0; i--) {
+          try {
+            void createdDisposers[i]?.();
+          } catch {
+            /* 清理失败不阻断其它清理 */
+          }
+        }
+        // 移除本作用域登记的服务
+        for (const key of createdServices) this.services.delete(key);
+        // 从全局 disposer 栈中剔除已回滚的项
+        this.disposers.length = Math.min(this.disposers.length, disposersLenBefore);
+      },
+    };
+  }
+
   /** 取出服务；未注册则抛错。 */
   resolve<T>(key: ServiceKey): T {
     const record = this.services.get(key);

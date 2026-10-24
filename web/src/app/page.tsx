@@ -33,7 +33,14 @@ import {
 } from "lucide-react";
 import { Group, Panel, Separator } from "react-resizable-panels";
 
-import { streamChat, fetchConfig, type ServerConfig, type ToolStreamEvent } from "../lib/api";
+import {
+  streamChat,
+  fetchConfig,
+  updateAppSettings,
+  type ServerConfig,
+  type ToolStreamEvent,
+  type AppSettings as ServerAppSettings,
+} from "../lib/api";
 import { RightPanel } from "../ui/RightPanel";
 import {
   SettingsModal,
@@ -239,7 +246,13 @@ export default function Home() {
   const serverSessionRef = useRef<Record<string, string>>({});
 
   useEffect(() => {
-    void fetchConfig().then(setServerCfg);
+    void fetchConfig().then((cfg) => {
+      if (!cfg) return;
+      setServerCfg(cfg);
+      // 用服务端持久化的设置覆盖本地默认值，保证刷新后状态一致
+      const s = (cfg as unknown as { settings?: ServerAppSettings }).settings;
+      if (s) setSettings((prev) => ({ ...prev, ...s }));
+    });
   }, []);
 
   // 字号：作用到根元素
@@ -265,8 +278,13 @@ export default function Home() {
     [sessions, activeId],
   );
 
+  /**
+   * 更新设置：先更新本地状态（界面即时响应），再异步落到后端。
+   * 后端会同时调整工具注册表（插件开关）与 fs 工具权限。
+   */
   const updateSettings = useCallback((patch: Partial<AppSettings>) => {
     setSettings((prev) => ({ ...prev, ...patch }));
+    void updateAppSettings(patch);
   }, []);
 
   const patchSession = useCallback((sessionId: string, fn: (s: Session) => Session) => {
@@ -311,6 +329,18 @@ export default function Home() {
       el.scrollTop = el.scrollHeight;
     }
   }, [active?.messages]);
+
+  // 全局快捷键：Ctrl/Cmd + K 聚焦输入框
+  useEffect(() => {
+    const onGlobalKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        textareaRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", onGlobalKey);
+    return () => window.removeEventListener("keydown", onGlobalKey);
+  }, []);
 
   // 输入框高度自适应
   useEffect(() => {
@@ -547,9 +577,17 @@ export default function Home() {
                 <Users size={11} />
                 子智能体 0 个
               </span>
-              <span className="shrink-0 rounded border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-caption">
-                {presetLabel}
-              </span>
+              {/* 预设与设置双向绑定：点击切换，设置里改动也会同步到这里 */}
+              <Select
+                value={settings.agentPreset}
+                onChange={(v) => updateSettings({ agentPreset: v })}
+                title="Agent 预设"
+                options={[
+                  { value: "standard", label: "标准模式" },
+                  { value: "minimal", label: "极简模式" },
+                  { value: "creative", label: "创造模式" },
+                ]}
+              />
               <button
                 type="button"
                 onClick={() => setSettingsOpen(true)}

@@ -14,12 +14,22 @@ import {
   KeyRound,
   Palette,
   Plug,
+  Puzzle,
+  RefreshCw,
   Settings2,
   Sparkles,
   X,
+  Loader2,
 } from "lucide-react";
 
-import { fetchConfig, updateConfig, type ServerConfig } from "../lib/api";
+import {
+  fetchConfig,
+  updateConfig,
+  fetchPlugins,
+  reloadPlugins,
+  type ServerConfig,
+  type PluginInfo,
+} from "../lib/api";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type PermissionMode = "workspace" | "full";
@@ -40,13 +50,14 @@ export const defaultSettings: AppSettings = {
   theme: "dark",
   fontSize: "medium",
   agentPreset: "standard",
-  plugins: { "fs-tools": true, "echo-tool": true, "session-log": true },
+  plugins: { "fs-tools": true, shell: true, "echo-tool": true, "session-log": true },
 };
 
 const TABS = [
   { id: "general", label: "通用设置", icon: Settings2 },
   { id: "model", label: "模型", icon: Sparkles },
   { id: "plugins", label: "内置插件", icon: Plug },
+  { id: "manage", label: "插件管理", icon: Puzzle },
   { id: "presets", label: "Agent 预设", icon: Bot },
 ] as const;
 
@@ -166,6 +177,11 @@ export function SettingsModal({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
+  // 插件管理
+  const [plugins, setPlugins] = useState<PluginInfo[]>([]);
+  const [pluginsLoading, setPluginsLoading] = useState(false);
+  const [reloadingId, setReloadingId] = useState<string | null>(null);
+
   useEffect(() => {
     if (!open) return;
     let alive = true;
@@ -182,6 +198,29 @@ export function SettingsModal({
       alive = false;
     };
   }, [open]);
+
+  // 切到插件管理页时拉取列表
+  useEffect(() => {
+    if (!open || tab !== "manage") return;
+    let alive = true;
+    setPluginsLoading(true);
+    void fetchPlugins().then((r) => {
+      if (!alive) return;
+      setPlugins(r.plugins);
+      setPluginsLoading(false);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [open, tab]);
+
+  /** 热重载一个插件（或全部）。 */
+  const doReload = async (id?: string) => {
+    setReloadingId(id ?? "__all__");
+    const r = await reloadPlugins(id);
+    setPlugins(r.plugins);
+    setReloadingId(null);
+  };
 
   if (!open) return null;
 
@@ -409,8 +448,9 @@ export function SettingsModal({
             {tab === "plugins" ? (
               <div className="space-y-2">
                 {[
-                  { id: "fs-tools", name: "文件系统工具", desc: "提供 fs.read / fs.write，受路径沙箱保护" },
-                  { id: "echo-tool", name: "回显工具", desc: "演示用 echo 工具，仅 Mock 模式可见" },
+                  { id: "fs-tools", name: "文件系统工具", desc: "提供 fs.read / fs.write；关闭后模型无法读写文件" },
+                  { id: "shell", name: "终端执行", desc: "提供 shell.run 与终端面板；关闭后命令无法执行" },
+                  { id: "echo-tool", name: "回显工具", desc: "演示用 echo 工具，仅 Mock 模式可调用" },
                   { id: "session-log", name: "会话日志", desc: "将每轮对话事件持久化为 JSONL" },
                 ].map((p) => (
                   <div
@@ -434,6 +474,91 @@ export function SettingsModal({
                     />
                   </div>
                 ))}
+              </div>
+            ) : null}
+
+            {/* ── 插件管理 ── */}
+            {tab === "manage" ? (
+              <div className="space-y-2">
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[11.5px] text-ink-caption">
+                    共 {plugins.length} 个插件
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void doReload()}
+                    disabled={reloadingId !== null}
+                    className="flex items-center gap-1.5 rounded-lg border border-line-strong px-2.5 py-1 text-[11.5px] text-ink-3 transition-colors hover:bg-white/[0.04] hover:text-ink disabled:opacity-50"
+                  >
+                    <RefreshCw size={11} className={reloadingId === "__all__" ? "animate-spin" : ""} />
+                    全部重载
+                  </button>
+                </div>
+
+                {pluginsLoading ? (
+                  <div className="flex items-center gap-2 py-4 text-[12px] text-ink-caption">
+                    <Loader2 size={13} className="animate-spin" />
+                    正在读取插件…
+                  </div>
+                ) : plugins.length === 0 ? (
+                  <div className="rounded-lg border border-line px-3 py-6 text-center text-[12px] text-ink-caption">
+                    暂无已加载的插件
+                    <div className="mt-1 text-[11px] text-ink-caption/70">
+                      将插件放入 ~/.lish/plugins/&lt;id&gt;/patch.json 后重启即可加载
+                    </div>
+                  </div>
+                ) : (
+                  plugins.map((p) => (
+                    <div key={p.id} className="rounded-lg border border-line px-3 py-2.5">
+                      <div className="flex items-start gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="truncate text-[13px] text-ink-2">{p.name}</span>
+                            {p.version ? (
+                              <span className="shrink-0 rounded bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-ink-caption">
+                                v{p.version}
+                              </span>
+                            ) : null}
+                            <span
+                              className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${
+                                p.status === "loaded"
+                                  ? "bg-emerald-500/15 text-emerald-400"
+                                  : p.status === "error"
+                                    ? "bg-red-500/15 text-red-400"
+                                    : "bg-white/[0.06] text-ink-caption"
+                              }`}
+                            >
+                              {p.status === "loaded"
+                                ? "已启用"
+                                : p.status === "error"
+                                  ? "报错"
+                                  : "已禁用"}
+                            </span>
+                          </div>
+                          <div className="mt-1 truncate font-mono text-[11px] text-ink-caption">
+                            {p.id} · {p.module}
+                          </div>
+                          {p.error ? (
+                            <div className="mt-1 break-words text-[11px] text-red-400">{p.error}</div>
+                          ) : null}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => void doReload(p.id)}
+                          disabled={reloadingId !== null}
+                          className="flex shrink-0 items-center gap-1 rounded-md border border-line-strong px-2 py-1 text-[11px] text-ink-3 transition-colors hover:bg-white/[0.05] hover:text-ink disabled:opacity-50"
+                          title="热重载该插件"
+                        >
+                          <RefreshCw
+                            size={10}
+                            className={reloadingId === p.id ? "animate-spin" : ""}
+                          />
+                          重载
+                        </button>
+                      </div>
+                    </div>
+                  ))
+                )}
               </div>
             ) : null}
 

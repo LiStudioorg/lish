@@ -167,7 +167,7 @@ async function runWeb(options: { port: string; host: string; dev?: boolean }): P
 
   // 动态导入：只有用到 Web 时才加载 express 及其依赖
   const { startServer, resolveWebRoot } = await import("./server.js");
-  const runtime = createRuntime(readConfig());
+  const runtime = await createRuntime(readConfig());
 
   if (!options.dev) {
     const root = resolveWebRoot();
@@ -200,7 +200,7 @@ async function runTuiCommand(): Promise<number> {
     return 2;
   }
   const { runTui } = await import("./tui.js");
-  const runtime = createRuntime(readConfig());
+  const runtime = await createRuntime(readConfig());
   try {
     return await runTui(runtime);
   } finally {
@@ -210,7 +210,7 @@ async function runTuiCommand(): Promise<number> {
 
 /** `lish chat`：极简文本聊天。 */
 async function runChatCommand(): Promise<number> {
-  const runtime = createRuntime(readConfig());
+  const runtime = await createRuntime(readConfig());
   try {
     return await runChat(runtime);
   } finally {

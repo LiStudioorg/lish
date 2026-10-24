@@ -23,7 +23,8 @@
     "build:web": "cd web && npm run build",
     "build": "npm run build:web && npm run build:cli",
     "build:cli": "tsc -p tsconfig.build.json && node -e \"require('fs').chmodSync('dist/cli.js', 0o755)\"",
-    "start:dev": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\""
+    "start:dev": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\"",
+    "test:plugins": "tsx src/core/plugins/test-plugins.ts"
   },
   "repository": {
     "type": "git",

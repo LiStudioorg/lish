@@ -30,11 +30,22 @@ export class PathEscapeError extends Error {
   }
 }
 
+export type FsPermission = "workspace" | "full";
+
 export interface FsToolsOptions {
   /** 单个文件的最大可读字节数，默认 1 MiB。 */
   maxReadBytes?: number;
   /** 单次写入的最大字节数，默认 1 MiB。 */
   maxWriteBytes?: number;
+  /**
+   * 权限模式。
+   *   - "workspace"（默认）：路径必须落在 workspaceRoot 内；
+   *   - "full"：允许访问工作区之外的绝对路径。
+   *
+   * 该值可由配置热更新：传入一个 getter 而非静态值，
+   * 这样用户在设置里改权限后，工具行为立即生效。
+   */
+  permission?: FsPermission | (() => FsPermission);
 }
 
 /**
@@ -130,6 +141,25 @@ export function createFsTools(
   const maxWriteBytes = options.maxWriteBytes ?? 1024 * 1024;
   const root = resolve(workspaceRoot);
 
+  /** 每次调用都重新求值，使权限变更即时生效。 */
+  const permission = (): FsPermission => {
+    const p = options.permission;
+    if (typeof p === "function") return p();
+    return p ?? "workspace";
+  };
+
+  /**
+   * 按当前权限解析目标路径。
+   * "full" 模式下跳过沙箱校验，但仍拒绝 NUL 字节等非法输入。
+   */
+  const resolveTarget = async (input: string): Promise<string> => {
+    if (permission() === "full") {
+      if (!input || input.includes("\0")) throw new Error("Path must be a non-empty string");
+      return isAbsolute(input) ? resolve(input) : resolve(root, input);
+    }
+    return resolveInsideWorkspace(root, input);
+  };
+
   const read: ToolDefinition = {
     name: "fs.read",
     description:
@@ -142,7 +172,7 @@ export function createFsTools(
       required: ["path"],
     },
     handler: async (args) => {
-      const target = await resolveInsideWorkspace(root, String(args.path ?? ""));
+      const target = await resolveTarget(String(args.path ?? ""));
       const info = await stat(target).catch(() => undefined);
       if (!info) {
         throw new Error(`File not found: ${String(args.path)}`);
@@ -183,7 +213,7 @@ export function createFsTools(
         );
       }
 
-      const target = await resolveInsideWorkspace(root, rawPath);
+      const target = await resolveTarget(rawPath);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, content, "utf8");
       return { path: rawPath, bytes };

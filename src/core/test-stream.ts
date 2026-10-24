@@ -413,11 +413,18 @@ function makeRuntime(): RuntimeConfig {
   };
 }
 
-/** 装配 runtime 并注册 echo 工具（MockProvider 默认调用它）。 */
-function makeWebRuntime() {
-  const runtime = createRuntime(makeRuntime());
-  runtime.tools.register({ name: "echo", handler: (args: Record<string, unknown>) => String(args.text ?? "") });
-  return runtime;
+/**
+ * 装配测试用 runtime。
+ *
+ * echo 工具由运行时按插件开关自动注册（MockProvider 默认调用它），
+ * 这里无需重复注册。
+ */
+async function makeWebRuntime() {
+  return createRuntime({
+    ...makeRuntime(),
+    // 测试环境用临时配置文件，避免污染用户真实的 ~/.lish/settings.json
+    provider: new MockProvider(),
+  });
 }
 
 /** 解析 AI SDK 数据流协议：`0:` 文本帧、`2:` 数据帧、`d:` 结束帧。 */
@@ -452,7 +459,7 @@ function parseAiSdkStream(raw: string): {
 }
 
 test("POST /api/chat 返回 AI SDK 数据流，含工具事件与最终文本", async () => {
-  const runtime = makeWebRuntime();
+  const runtime = await makeWebRuntime();
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
@@ -506,7 +513,7 @@ test("POST /api/chat 返回 AI SDK 数据流，含工具事件与最终文本", 
 });
 
 test("兼容手写的 { message } 请求格式", async () => {
-  const runtime = makeWebRuntime();
+  const runtime = await makeWebRuntime();
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
@@ -527,7 +534,7 @@ test("兼容手写的 { message } 请求格式", async () => {
 });
 
 test("POST /api/chat 空消息返回 400", async () => {
-  const runtime = createRuntime(makeRuntime());
+  const runtime = await createRuntime(makeRuntime());
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
@@ -546,7 +553,7 @@ test("POST /api/chat 空消息返回 400", async () => {
 });
 
 test("GET /api/health 返回模型与工具信息", async () => {
-  const runtime = createRuntime(makeRuntime());
+  const runtime = await createRuntime(makeRuntime());
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
@@ -565,7 +572,7 @@ test("GET /api/health 返回模型与工具信息", async () => {
 });
 
 test("多轮对话：复用同一 sessionId 可延续上下文", async () => {
-  const runtime = makeWebRuntime();
+  const runtime = await makeWebRuntime();
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;
@@ -599,7 +606,7 @@ test("多轮对话：复用同一 sessionId 可延续上下文", async () => {
 });
 
 test("客户端断开后不留事件监听器（无内存泄漏）", async () => {
-  const runtime = createRuntime(makeRuntime());
+  const runtime = await createRuntime(makeRuntime());
   const app = createApp(runtime);
   const server = app.listen(0);
   const port = (server.address() as { port: number }).port;

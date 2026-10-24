@@ -14,7 +14,19 @@ import { LlmRuntime, MockProvider, type LlmProvider } from "./core/llm.js";
 import { OpenAIProvider } from "./core/providers/openai.js";
 import { SessionService } from "./core/sessions.js";
 import { ToolRegistry } from "./core/tools.js";
-import { registerFsTools } from "./tools/fs.js";
+import { createFsTools } from "./tools/fs.js";
+import { createShellTool } from "./tools/shell.js";
+import {
+  DEFAULT_SETTINGS,
+  loadSettings,
+  saveSettings,
+  mergeSettings,
+  type AppSettings,
+} from "./core/settings.js";
+import { PluginLoader } from "./core/plugins/loader.js";
+import { PluginHotReloader } from "./core/plugins/hot-reload.js";
+import type { LoadedPluginInfo } from "./core/plugins/loader.js";
+import { existsSync } from "node:fs";
 
 /** 前端共享的运行时配置。 */
 export interface RuntimeConfig {
@@ -106,6 +118,16 @@ export interface Runtime {
    * 返回更新后的配置快照。
    */
   updateLlmConfig(patch: LlmConfigPatch): RuntimeConfig;
+  /** 当前应用配置（权限、插件开关、外观）。 */
+  getSettings(): AppSettings;
+  /** 合并并持久化应用配置，同时让工具注册即时生效。 */
+  updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** 工作区根目录（文件树与终端的工作目录）。 */
+  workspaceRoot: string;
+  /** 当前已加载的插件列表。 */
+  listPlugins(): LoadedPluginInfo[];
+  /** 热重载指定插件（或全部）。 */
+  reloadPlugins(id?: string): Promise<LoadedPluginInfo[]>;
   /** 拆除运行时：冲洗会话日志并销毁内核。 */
   shutdown(): Promise<void>;
 }
@@ -141,7 +163,7 @@ export function maskApiKey(key: string): string {
 }
 
 /** 装配一个完整的运行时。 */
-export function createRuntime(config: RuntimeConfig): Runtime {
+export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   const ctx = new Context();
 
   // 会话服务
@@ -162,25 +184,96 @@ export function createRuntime(config: RuntimeConfig): Runtime {
   const llm = new LlmRuntime(ctx, { provider });
   ctx.provide(LlmRuntime.KEY, llm);
 
-  // 工具：文件系统工具绑定到工作区，路径沙箱对三个前端一律生效
+  // 工具注册表
   const tools = new ToolRegistry(ctx);
   ctx.provide(ToolRegistry.KEY, tools);
-  registerFsTools(tools, config.workspaceRoot);
 
-  // MockProvider 默认会请求 echo 工具；仅在使用 Mock 时注册，
-  // 避免真实模型看到这个无实际用途的工具。
-  if (config.provider && config.provider.name === "mock") {
-    tools.register({
-      name: "echo",
-      description: "原样返回输入文本（演示/自测用）",
-      parameters: { type: "object", properties: { text: { type: "string" } } },
-      handler: (args) => String(args.text ?? ""),
-    });
-  }
+  // --- 应用配置（权限 / 插件开关），从磁盘加载 ---
+  let appSettings: AppSettings = await loadSettings();
+
+  const fsTools = createFsTools(config.workspaceRoot, {
+    // 传入 getter：用户在设置里改权限后，工具行为立即变化，无需重启
+    permission: () => appSettings.permission,
+  });
+
+  const shellTool = createShellTool(config.workspaceRoot);
+
+  const echoTool = {
+    name: "echo",
+    description: "原样返回输入文本（演示/自测用）",
+    parameters: { type: "object", properties: { text: { type: "string" } } },
+    handler: (args: Record<string, unknown>) => String(args.text ?? ""),
+  };
+
+  /**
+   * 依据插件开关同步工具注册表。
+   *
+   * 关掉某个插件 = 从注册表移除对应工具，
+   * 模型的 tools 列表随之缩小，因此**物理上无法调用**。
+   */
+  const syncTools = () => {
+    const want = {
+      "fs.read": appSettings.plugins["fs-tools"],
+      "fs.write": appSettings.plugins["fs-tools"],
+      "shell.run": appSettings.plugins.shell,
+      echo: appSettings.plugins["echo-tool"] && config.provider?.name === "mock",
+    } as const;
+
+    const register = {
+      "fs.read": () => fsTools.read,
+      "fs.write": () => fsTools.write,
+      "shell.run": () => shellTool,
+      echo: () => echoTool,
+    } as const;
+
+    for (const [name, enabled] of Object.entries(want)) {
+      const key = name as keyof typeof register;
+      if (enabled) {
+        if (!tools.has(name)) tools.register(register[key]());
+      } else if (tools.has(name)) {
+        tools.unregister(name);
+      }
+    }
+  };
+
+  syncTools();
 
   // Agent 循环
   const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps });
   ctx.provide(AgentLoop.KEY, agent);
+
+  // --- 插件系统（Bundle / Patch / Loader + HMR）---
+  const pluginDir = process.env.LISH_PLUGINS_DIR ?? join(homedir(), ".lish", "plugins");
+  const patchFiles: string[] = [];
+  // 约定：~/.lish/plugins/*/patch.json 会被自动应用
+  if (existsSync(pluginDir)) {
+    try {
+      const { readdirSync } = await import("node:fs");
+      for (const entry of readdirSync(pluginDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const candidate = join(pluginDir, entry.name, "patch.json");
+        if (existsSync(candidate)) patchFiles.push(candidate);
+      }
+    } catch {
+      // 目录不可读时跳过
+    }
+  }
+  // 仓库内置示例（便于本地验证整套链路）
+  const bundledPatch = join(config.workspaceRoot, "examples", "plugins", "hello-world", "patch.json");
+  if (process.env.LISH_LOAD_EXAMPLE_PLUGIN === "1" && existsSync(bundledPatch)) {
+    patchFiles.push(bundledPatch);
+  }
+
+  const loader = await PluginLoader.create({
+    ctx,
+    patchFiles,
+    resolveBase: config.workspaceRoot,
+  });
+
+  const hotReloader = new PluginHotReloader({
+    loader,
+    dirs: [pluginDir],
+  });
 
   // 可变配置：设置面板通过 updateLlmConfig 热更新
   let currentConfig: RuntimeConfig = { ...config };
@@ -227,8 +320,41 @@ export function createRuntime(config: RuntimeConfig): Runtime {
     get config() {
       return currentConfig;
     },
+    workspaceRoot: config.workspaceRoot,
+    listPlugins() {
+      return loader.list();
+    },
+    async reloadPlugins(id?: string) {
+      if (id) {
+        await loader.update(id, {});
+      } else {
+        for (const p of loader.list()) {
+          await loader.update(p.id, {});
+        }
+      }
+      return loader.list();
+    },
+    getSettings() {
+      return appSettings;
+    },
+    async updateSettings(patch: Partial<AppSettings>) {
+      appSettings = mergeSettings(appSettings, patch);
+      syncTools();
+      try {
+        await saveSettings(appSettings);
+      } catch {
+        // 写入失败不应阻断本次会话，内存中的配置仍然生效
+      }
+      return appSettings;
+    },
     updateLlmConfig,
     async shutdown() {
+      hotReloader.dispose();
+      try {
+        await loader.disposeAll();
+      } catch {
+        // 插件清理失败不应阻断拆除
+      }
       try {
         await sessions.flushAll();
       } catch {

@@ -32,6 +32,7 @@ const suites: Suite[] = [
   { name: "fs", file: "src/tools/test-fs.ts" },
   { name: "openai", file: "src/core/providers/test-openai.ts" },
   { name: "stream", file: "src/core/test-stream.ts" },
+  { name: "plugins", file: "src/core/plugins/test-plugins.ts" },
 ];
 
 interface SuiteResult {

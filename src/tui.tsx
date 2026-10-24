@@ -316,7 +316,7 @@ const entry = process.argv[1] ?? "";
 if (/[\\/]tui\.(tsx|ts|js)$/.test(entry)) {
   const { createRuntime, readConfig } = await import("./runtime.js");
   try {
-    const runtime = createRuntime(readConfig());
+    const runtime = await createRuntime(readConfig());
     const code = await runTui(runtime);
     await runtime.shutdown();
     process.exitCode = code;

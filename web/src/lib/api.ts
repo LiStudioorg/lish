@@ -210,3 +210,155 @@ export async function updateConfig(
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// --- 应用配置（权限 / 插件 / 外观）----------------------------------------
+
+export type PermissionMode = "workspace" | "full";
+export type ThemeMode = "light" | "dark" | "system";
+export type FontSize = "small" | "medium" | "large";
+export type AgentPreset = "standard" | "minimal" | "creative";
+export type PluginId = "fs-tools" | "shell" | "echo-tool" | "session-log";
+
+export interface AppSettings {
+  permission: PermissionMode;
+  theme: ThemeMode;
+  fontSize: FontSize;
+  agentPreset: AgentPreset;
+  plugins: Record<PluginId, boolean>;
+}
+
+/** 提交应用配置（与 LLM 配置共用 /api/config）。 */
+export async function updateAppSettings(
+  settings: Partial<AppSettings>,
+): Promise<{ ok: boolean; settings?: AppSettings; tools?: string[]; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/config`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ settings }),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      settings?: AppSettings;
+      tools?: string[];
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+    return { ok: true, settings: data.settings, tools: data.tools };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- 文件树 ---------------------------------------------------------------
+
+export interface FileNode {
+  path: string;
+  name: string;
+  type: "file" | "dir";
+  size?: number;
+  children?: FileNode[];
+}
+
+export async function fetchFileTree(): Promise<{ ok: boolean; tree?: FileNode; root?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/files`);
+    if (!res.ok) return { ok: false };
+    const data = (await res.json()) as { ok: boolean; tree: FileNode; root: string };
+    return { ok: data.ok, tree: data.tree, root: data.root };
+  } catch {
+    return { ok: false };
+  }
+}
+
+export async function fetchFileContent(
+  path: string,
+): Promise<{ ok: boolean; content?: string; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/files/content?path=${encodeURIComponent(path)}`);
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      content?: string;
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+    return { ok: true, content: data.content };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- 终端执行 -------------------------------------------------------------
+
+export interface ExecResult {
+  ok: boolean;
+  command?: string;
+  stdout?: string;
+  stderr?: string;
+  code?: number | null;
+  timedOut?: boolean;
+  durationMs?: number;
+  error?: string;
+}
+
+export async function execCommand(command: string): Promise<ExecResult> {
+  try {
+    const res = await fetch(`${API_BASE}/api/exec`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ command }),
+    });
+    const data = (await res.json().catch(() => ({}))) as ExecResult & { error?: string };
+    if (!res.ok) return { ok: false, error: data.error ?? `HTTP ${res.status}` };
+    return data;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+// --- 插件管理 -------------------------------------------------------------
+
+export type PluginStatus = "loaded" | "disabled" | "error";
+
+export interface PluginInfo {
+  id: string;
+  name: string;
+  version?: string;
+  module: string;
+  status: PluginStatus;
+  error?: string;
+  loadMs?: number;
+  sourceDir?: string;
+}
+
+export async function fetchPlugins(): Promise<{ ok: boolean; plugins: PluginInfo[] }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/plugins`);
+    if (!res.ok) return { ok: false, plugins: [] };
+    const data = (await res.json()) as { ok: boolean; plugins: PluginInfo[] };
+    return { ok: data.ok, plugins: data.plugins ?? [] };
+  } catch {
+    return { ok: false, plugins: [] };
+  }
+}
+
+export async function reloadPlugins(
+  id?: string,
+): Promise<{ ok: boolean; plugins: PluginInfo[]; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/plugins/reload`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(id ? { id } : {}),
+    });
+    const data = (await res.json().catch(() => ({}))) as {
+      ok?: boolean;
+      plugins?: PluginInfo[];
+      error?: string;
+    };
+    if (!res.ok) return { ok: false, plugins: [], error: data.error ?? `HTTP ${res.status}` };
+    return { ok: true, plugins: data.plugins ?? [] };
+  } catch (err) {
+    return { ok: false, plugins: [], error: err instanceof Error ? err.message : String(err) };
+  }
+}
