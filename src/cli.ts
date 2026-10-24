@@ -11,7 +11,7 @@
  * Web 选项：
  *   -p, --port <number>   端口，默认 3000
  *   -H, --host <string>   监听地址，默认 0.0.0.0（允许局域网访问）
- *   --dev                 开发模式：不托管静态文件，提示改用 Vite
+ *   --dev                 开发模式：不托管静态文件（由 Next.js dev server 提供）
  *
  * 环境变量：
  *   LLM_API_KEY        必填，API 密钥
@@ -22,7 +22,9 @@
  *   LLISH_NO_PERSIST   设置后会话不落盘
  */
 
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 
@@ -219,6 +221,33 @@ async function runChatCommand(): Promise<number> {
 
 // --- 程序装配 -------------------------------------------------------------
 
+/**
+ * 读取 package.json 中的版本号。
+ *
+ * 不硬编码：发布新版本时只需改 package.json，
+ * 避免 CLI 显示的版本与实际包版本不一致。
+ * 从 dist/cli.js 出发向上查找 package.json（兼容源码与编译两种位置）。
+ */
+function readPackageVersion(): string {
+  const start = dirname(fileURLToPath(import.meta.url));
+  let dir = start;
+  for (let depth = 0; depth < 6; depth++) {
+    try {
+      const raw = readFileSync(join(dir, "package.json"), "utf8");
+      const pkg = JSON.parse(raw) as { version?: unknown };
+      if (typeof pkg.version === "string" && pkg.version.length > 0) {
+        return pkg.version;
+      }
+    } catch {
+      // 本层没有 package.json，继续向上
+    }
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "0.0.0";
+}
+
 /** 创建 commander 程序（导出以便测试）。 */
 export function buildProgram(): Command {
   const program = new Command();
@@ -226,7 +255,7 @@ export function buildProgram(): Command {
   program
     .name("lish")
     .description("微内核 Agent 工具：Web UI、终端 TUI 与文本聊天")
-    .version("0.0.1")
+    .version(readPackageVersion())
     // 不带子命令时默认执行 web
     .action(async () => {
       await program.parseAsync(["node", "lish", "web"]);

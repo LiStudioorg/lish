@@ -139,7 +139,7 @@ function asEventPayload(value: unknown): EventPayloadShape | null {
 export function createApp(runtime: Runtime): express.Express {
   const app = express();
 
-  // CORS：显式允许 Vite 开发服务器。
+  // CORS：显式允许 Next.js 开发服务器。
   // 开发期也可能用到 3081（上游复刻项目的默认端口）与 127.0.0.1 变体。
   // 允许的来源：
   //   - 本机各端口（localhost / 127.0.0.1）
@@ -213,7 +213,7 @@ export function createApp(runtime: Runtime): express.Express {
           `<meta charset="utf-8"><body style="font-family:system-ui;background:#0b0d12;color:#e6e8ee;padding:40px">
            <h2>前端尚未构建</h2>
            <p>请先执行 <code>npm run build</code> 打包前端（生成 <code>web/dist</code>），再重新启动。</p>
-           <p>开发模式下请改用 <code>npm run start:dev</code>（前端由 Vite 提供）。</p>
+           <p>开发模式下请改用 <code>npm run start:dev</code>（前端由 Next.js 开发服务器提供）。</p>
            <p>接口健康检查：<a style="color:#7aa2ff" href="/api/health">/api/health</a></p>
            </body>`,
         );

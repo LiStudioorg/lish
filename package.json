@@ -1,6 +1,6 @@
 {
-  "name": "lish",
-  "version": "0.0.1",
+  "name": "@listudioorg/lish",
+  "version": "0.1.0-alpha.1",
   "description": "",
   "main": "index.js",
   "type": "module",
@@ -72,5 +72,8 @@
     "dist",
     "README.md",
     "LICENSE"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

@@ -10,49 +10,100 @@
 
 ## 安装
 
-### 全局安装（推荐）
+> **包名说明**：本项目的 npm 包名为 `@listudioorg/lish`。
+> 安装后命令行入口是 `lish`（不带 scope）。
+> npm 上另有同名的第三方包 `lish`（LiveShell），请勿混淆。
+
+### 前置要求
+
+- Node.js **>= 22**（项目使用了 `AsyncLocalStorage`、原生 `fetch` 等特性）
+- 可用内存 **>= 4GB**（从源码安装需构建 Next.js 前端）
+
+### 1. 从 npm 全局安装
 
 ```bash
-# npm
-npm install -g lish
-
-# pnpm
-pnpm add -g lish
-
-# bun
-bun add -g lish
+npm install -g @listudioorg/lish
 ```
 
-安装后即可在任意目录执行 `lish`。
-
-### 从源码运行
+### 2. 使用 pnpm 全局安装
 
 ```bash
-git clone <repo-url> lish
+pnpm add -g @listudioorg/lish
+```
+
+> pnpm 需要全局 bin 目录在 `PATH` 中。若提示
+> `ERR_PNPM_GLOBAL_BIN_DIR_NOT_IN_PATH`，先执行一次 `pnpm setup`。
+
+### 3. 使用 bun 全局安装
+
+```bash
+bun add -g @listudioorg/lish
+```
+
+### 4. 从源码安装
+
+#### 4.1 本地源码目录
+
+```bash
+git clone https://github.com/LiStudioorg/lish.git
 cd lish
-npm install
-npm run build
-node dist/cli.js web
+npm install        # 自动触发 prepare：构建前端 + 编译后端
+npm link           # 或 npm install -g .
 ```
 
-也可以在源码目录直接以开发模式运行（无需构建）：
+也可直接全局安装源码目录（无需先进入目录）：
 
 ```bash
-npm run start:dev          # 后端 + Vite 前端热更新
-# 或
-npx tsx src/cli.ts web     # 仅后端，托管已构建的 front-end
+npm install -g /path/to/lish
 ```
+
+#### 4.2 Git 仓库地址
+
+```bash
+npm install -g git+https://github.com/LiStudioorg/lish.git
+
+# 或 SSH 形式
+npm install -g git+ssh://git@github.com/LiStudioorg/lish.git
+```
+
+> **注意**：从 Git 源码构建需要下载大量依赖并执行 Next.js 编译，
+> 请确保机器至少有 **4GB 可用内存**，首次安装可能耗时 **10-20 分钟**。
+> 内存不足或并行安装多个包时容易触发 OOM，请串行执行。
+
+#### 4.3 源码开发模式（不安装为全局命令）
+
+```bash
+npm run start:dev      # 后端 + Next.js 前端（开发模式）
+npx tsx src/cli.ts web # 仅后端，托管已构建的前端产物
+```
+
+### 安装时的自动构建
+
+`prepare` 脚本在从源码/Git 安装时自动执行以下步骤：
+
+1. 安装 `web/` 子项目依赖（`npm install --prefix web`）
+2. 构建前端静态资源（`next build` → `web/out`）
+3. 编译后端 TypeScript（`tsc` → `dist/`）
+4. 复制前端产物到 `dist/web`，确保随包发布
+
+从 npm 安装已发布的包时不会触发（`dist/` 与 `dist/web/` 已随包提供）。
 
 ### 验证安装
 
 ```bash
-lish --version
-lish web --port 3000
-# 浏览器打开 http://localhost:3000
+lish --version          # 期望输出 0.1.0-alpha.1
+lish web --port 3000    # 启动后用浏览器打开 http://localhost:3000
 ```
 
-无论全局安装还是源码运行，前端静态资源都会从**包内自带**的
-`dist/web` 目录加载，不依赖当前工作目录。
+### 安装方式验证状态
+
+| 安装方式 | 验证状态 | 说明 |
+| --- | --- | --- |
+| npm 本地源码目录 | ✅ 已实测 | `/tmp` 下启动，页面与 API 均正常 |
+| pnpm 全局安装 | ✅ 已实测 | 同上 |
+| bun 全局安装 | ✅ 已实测 | 同上 |
+| Git 仓库地址 | ⚠️ 未完成端到端验证 | 流程与本地源码一致（多一步 clone），本机因内存限制未跑完 |
+| npm 已发布包 | ⏳ 待发布 | 包名 `@listudioorg/lish` 已就绪，尚未执行 `npm publish` |
 
 ## 使用
 
@@ -111,7 +162,7 @@ export function dispose() {
 ## 开发
 
 ```bash
-npm run start:dev     # 后端 + Vite 前端（开发模式）
+npm run start:dev     # 后端 + Next.js 前端（开发模式）
 npm test              # 全量测试
 npm run lint          # ESLint
 npx tsc --noEmit      # 类型检查
