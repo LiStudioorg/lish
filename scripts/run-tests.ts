@@ -34,6 +34,7 @@ const suites: Suite[] = [
   { name: "stream", file: "src/core/test-stream.ts" },
   { name: "plugins", file: "src/core/plugins/test-plugins.ts" },
   { name: "trace", file: "src/core/test-trace.ts" },
+  { name: "subagent", file: "src/core/test-subagent.ts" },
 ];
 
 interface SuiteResult {

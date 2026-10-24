@@ -26,7 +26,8 @@
     "start:dev": "concurrently -n api,web -c blue,magenta \"tsx src/server.ts\" \"cd web && npm run dev\"",
     "test:plugins": "tsx src/core/plugins/test-plugins.ts",
     "lint": "eslint src scripts examples",
-    "test:trace": "tsx src/core/test-trace.ts"
+    "test:trace": "tsx src/core/test-trace.ts",
+    "test:subagent": "tsx src/core/test-subagent.ts"
   },
   "repository": {
     "type": "git",

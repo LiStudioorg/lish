@@ -165,6 +165,16 @@ export class AgentLoop {
     };
   }
 
+  /** 当前配置的最大步数（子代理继承用）。 */
+  get maxSteps(): number {
+    return this.options.maxSteps;
+  }
+
+  /** 轨迹存储引用（子代理共享同一条轨迹链路）。 */
+  get traceStoreForChild(): TraceStore {
+    return this.traceStore;
+  }
+
   /** 惰性解析依赖，以便本插件可以先于依赖被挂载。 */
   private get llm(): LlmRuntime {
     if (!this.ctx.has(LlmRuntime.KEY)) {

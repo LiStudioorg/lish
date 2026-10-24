@@ -67,15 +67,35 @@ export interface TraceEvent {
   error?: string;
 }
 
+/**
+ * 轨迹事件的持久化钩子。
+ *
+ * 由 Runtime 注入：把事件写入该会话的 append-only JSONL 日志。
+ * 这样进程重启后可通过日志重建轨迹（事件溯源）。
+ */
+export type TracePersist = (event: TraceEvent) => void;
+
 /** 轨迹容器：按 traceId 分组保存在内存中，并限制总量防泄漏。 */
 export class TraceStore {
   /** 单会话最多保留的事件数，超出按 FIFO 淘汰。 */
   private readonly maxPerSession: number;
   private readonly bySession = new Map<string, TraceEvent[]>();
+  /** 持久化回调；未注入时退化为纯内存模式。 */
+  private persist?: TracePersist;
   private seq = 0;
 
-  constructor(maxPerSession = 2000) {
+  constructor(maxPerSession = 2000, persist?: TracePersist) {
     this.maxPerSession = maxPerSession;
+    this.persist = persist;
+  }
+
+  /**
+   * 注入（或替换）持久化钩子。
+   *
+   * Runtime 在 SessionService 就绪后调用，避免构造期的循环依赖。
+   */
+  setPersist(persist: TracePersist | undefined): void {
+    this.persist = persist;
   }
 
   /** 追加事件，返回带 id 的完整事件。 */
@@ -90,7 +110,38 @@ export class TraceStore {
       list.splice(0, list.length - this.maxPerSession);
     }
     this.bySession.set(event.sessionId, list);
+
+    // 同步写入持久化日志。失败不得影响主流程（轨迹是旁路，不是主链路）。
+    try {
+      this.persist?.(full);
+    } catch {
+      /* 持久化失败时静默降级为纯内存 */
+    }
+
     return full;
+  }
+
+  /**
+   * 从已持久化的历史事件重建某会话的内存视图。
+   *
+   * 用于进程重启后首次访问：把 JSONL 中的 trace 事件回放到内存，
+   * 之后再追加新事件即可无缝衔接。
+   */
+  hydrate(sessionId: string, events: TraceEvent[]): void {
+    if (events.length === 0) return;
+    const existing = this.bySession.get(sessionId) ?? [];
+    const seen = new Set(existing.map((e) => e.id));
+    const merged = [...events.filter((e) => !seen.has(e.id)), ...existing];
+    merged.sort((a, b) => a.timestamp - b.timestamp);
+    this.bySession.set(
+      sessionId,
+      merged.length > this.maxPerSession ? merged.slice(-this.maxPerSession) : merged,
+    );
+  }
+
+  /** 是否已有该会话的内存数据。 */
+  has(sessionId: string): boolean {
+    return (this.bySession.get(sessionId)?.length ?? 0) > 0;
   }
 
   /** 读取某会话的全部事件（按时间顺序）。 */

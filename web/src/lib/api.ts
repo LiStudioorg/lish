@@ -423,3 +423,43 @@ export async function fetchTraceEvents(sessionId: string): Promise<{
     return { ok: false, events: [], error: err instanceof Error ? err.message : String(err) };
   }
 }
+
+// --- 子代理 ---------------------------------------------------------------
+
+export interface SubAgentRecord {
+  id: string;
+  role: string;
+  task: string;
+  status: "running" | "done" | "error";
+  startedAt: number;
+  finishedAt?: number;
+  sessionId: string;
+  result?: string;
+  error?: string;
+}
+
+export async function fetchSubAgents(): Promise<{
+  ok: boolean;
+  running: number;
+  total: number;
+  agents: SubAgentRecord[];
+}> {
+  try {
+    const res = await fetch(`${API_BASE}/api/subagents`);
+    if (!res.ok) return { ok: false, running: 0, total: 0, agents: [] };
+    const d = (await res.json()) as {
+      ok: boolean;
+      running?: number;
+      total?: number;
+      agents?: SubAgentRecord[];
+    };
+    return {
+      ok: d.ok,
+      running: d.running ?? 0,
+      total: d.total ?? 0,
+      agents: d.agents ?? [],
+    };
+  } catch {
+    return { ok: false, running: 0, total: 0, agents: [] };
+  }
+}

@@ -213,6 +213,28 @@ export function createApp(runtime: Runtime): express.Express {
   });
 
   /**
+   * 子代理列表。
+   *
+   * 前端用它展示「子智能体 N 个」以及轨迹面板中的独立子代理分组。
+   */
+  app.get("/api/subagents", (_req, res) => {
+    try {
+      const agents = runtime.listSubAgents();
+      res.json({
+        ok: true,
+        running: agents.filter((a) => a.status === "running").length,
+        total: agents.length,
+        agents,
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
+  /**
    * 会话轨迹事件。
    *
    * 返回完整事件数组，每条包含 traceId、毫秒时间戳、真实耗时与 tokenUsage，

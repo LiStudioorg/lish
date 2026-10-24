@@ -9,6 +9,8 @@
 
 import type { Context } from "../kernel/context.js";
 import { Session, type SessionOptions } from "./session.js";
+import { readdir } from "node:fs/promises";
+import { join } from "node:path";
 
 export interface SessionServiceOptions {
   /** 通过 `create()` 创建会话时应用的默认选项。 */
@@ -28,6 +30,45 @@ export class SessionService {
   constructor(ctx: Context, options: SessionServiceOptions = {}) {
     this.ctx = ctx;
     this.options = options;
+  }
+
+  /**
+   * 从磁盘目录恢复历史会话。
+   *
+   * 事件溯源要求会话日志是唯一真源，因此进程重启后必须能读回来，
+   * 否则轨迹、对话历史都会丢失。filename 形如 `<id>.jsonl`。
+   */
+  async loadFromDisk(): Promise<number> {
+    const dir = this.options.dir;
+    if (!dir) return 0;
+
+    let entries: string[];
+    try {
+      entries = await readdir(dir);
+    } catch {
+      return 0;
+    }
+
+    let loaded = 0;
+    for (const name of entries) {
+      if (!name.endsWith(".jsonl")) continue;
+      const id = name.slice(0, -".jsonl".length);
+      if (this.sessions.has(id)) continue;
+
+      try {
+        const session = await Session.load(join(dir, name));
+        this.sessions.set(session.id, session);
+        loaded++;
+      } catch {
+        // 单个文件损坏不应阻断其它会话的恢复
+      }
+    }
+    return loaded;
+  }
+
+  /** 已登记的会话数量（诊断用）。 */
+  get count(): number {
+    return this.sessions.size;
   }
 
   /** 创建并登记一个会话，同时发出 `sessions:created` 事件。 */

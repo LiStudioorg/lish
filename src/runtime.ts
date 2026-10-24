@@ -24,7 +24,13 @@ import {
 } from "./core/settings.js";
 import { PluginLoader } from "./core/plugins/loader.js";
 import { TraceStore, type TraceEvent } from "./core/trace.js";
+import {
+  createSpawnAgentTool,
+  SubAgentRegistry,
+  type SubAgentRecord,
+} from "./core/sub-agent.js";
 import { PluginHotReloader } from "./core/plugins/hot-reload.js";
+import { discoverPlugins, ensurePluginDir } from "./core/plugins/discover.js";
 import type { LoadedPluginInfo } from "./core/plugins/loader.js";
 import { existsSync } from "node:fs";
 
@@ -130,6 +136,8 @@ export interface Runtime {
   reloadPlugins(id?: string): Promise<LoadedPluginInfo[]>;
   /** 读取某会话的轨迹事件。 */
   listTraceEvents(sessionId: string): TraceEvent[];
+  /** 子代理运行记录（前端状态栏与轨迹分组用）。 */
+  listSubAgents(): SubAgentRecord[];
   /** 拆除运行时：冲洗会话日志并销毁内核。 */
   shutdown(): Promise<void>;
 }
@@ -174,6 +182,11 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     ...(config.sessionDir ? { dir: config.sessionDir } : {}),
   });
   ctx.provide(SessionService.KEY, sessions);
+  // 事件溯源：启动时恢复磁盘上的历史会话
+  const restored = await sessions.loadFromDisk();
+  if (restored > 0) {
+    console.log(`  已恢复 ${restored} 个历史会话`);
+  }
 
   // LLM 运行时
   const provider =
@@ -241,11 +254,43 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   syncTools();
 
   // 轨迹存储：注入给 AgentLoop，核心只负责写事件
-  const traceStore = new TraceStore();
+  const traceStore = new TraceStore(2000);
+
+  /*
+   * 轨迹持久化：同步写入该会话的 append-only JSONL。
+   *
+   * 事件溯源要求轨迹不丢失，因此不能只存内存。
+   * 记录 type 前缀 `trace.` 以便与对话事件区分，并按原字段展开存储。
+   */
+  traceStore.setPersist((event) => {
+    const session = sessions.get(event.sessionId);
+    if (!session) return;
+    session.append({
+      type: "trace.event",
+      trace: event,
+    });
+  });
 
   // Agent 循环
   const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps, traceStore });
   ctx.provide(AgentLoop.KEY, agent);
+
+  /*
+   * 子智能体：通过 spawn_agent 工具暴露。
+   * 采用工具而非核心分支，符合开闭原则；子代理继承同一 ctx / tools / traceStore。
+   */
+  const subAgents = new SubAgentRegistry();
+  const spawnTool = createSpawnAgentTool({
+    ctx,
+    sessions,
+    agent,
+    tools,
+    registry: subAgents,
+    maxDepth: 2,
+    maxSteps: 6,
+  });
+  // 子代理能力独立于其它插件开关：即使只保留对话能力也可派生
+  tools.register(spawnTool);
 
   // --- 插件系统（Bundle / Patch / Loader + HMR）---
   const pluginDir = process.env.LISH_PLUGINS_DIR ?? join(homedir(), ".lish", "plugins");
@@ -269,8 +314,15 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     patchFiles.push(bundledPatch);
   }
 
+  // 确保插件目录存在（不存在则创建，便于用户直接投放插件）
+  await ensurePluginDir(pluginDir);
+
+  // 扫描单文件插件（.ts/.js 直投即生效）
+  const discovered = await discoverPlugins(pluginDir);
+
   const loader = await PluginLoader.create({
     ctx,
+    baseRows: discovered,
     patchFiles,
     resolveBase: config.workspaceRoot,
   });
@@ -329,7 +381,23 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     listPlugins() {
       return loader.list();
     },
+    listSubAgents() {
+      return subAgents.list();
+    },
     listTraceEvents(sessionId: string) {
+      // 内存为空时尝试从会话日志回放（进程重启后的历史轨迹）
+      if (!traceStore.has(sessionId)) {
+        const session = sessions.get(sessionId);
+        if (session) {
+          const persisted: TraceEvent[] = [];
+          for (const e of session.log) {
+            if (e.type === "trace.event" && e.trace) {
+              persisted.push(e.trace as TraceEvent);
+            }
+          }
+          traceStore.hydrate(sessionId, persisted);
+        }
+      }
       return traceStore.list(sessionId);
     },
     async reloadPlugins(id?: string) {

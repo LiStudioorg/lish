@@ -38,7 +38,9 @@ import {
   fetchConfig,
   updateAppSettings,
   fetchTraceEvents,
+  fetchSubAgents,
   type TraceEvent,
+  type SubAgentRecord,
   type ServerConfig,
   type ToolStreamEvent,
   type AppSettings as ServerAppSettings,
@@ -246,6 +248,8 @@ export default function Home() {
   const [mainTab, setMainTab] = useState<"chat" | "trace">("chat");
   /** 轨迹事件（与对话状态隔离，避免流式增量污染轨迹列表） */
   const [traceEvents, setTraceEvents] = useState<TraceEvent[]>([]);
+  /** 子代理记录（状态栏计数 + 轨迹分组） */
+  const [subAgents, setSubAgents] = useState<SubAgentRecord[]>([]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -289,6 +293,12 @@ export default function Home() {
    * 更新设置：先更新本地状态（界面即时响应），再异步落到后端。
    * 后端会同时调整工具注册表（插件开关）与 fs 工具权限。
    */
+  /** 拉取子代理列表。 */
+  const loadSubAgents = useCallback(async () => {
+    const r = await fetchSubAgents();
+    if (r.ok) setSubAgents(r.agents);
+  }, []);
+
   /** 拉取当前会话的轨迹事件。 */
   const loadTrace = useCallback(async (serverSessionId: string | undefined) => {
     if (!serverSessionId) return;
@@ -472,6 +482,7 @@ export default function Home() {
         abortRef.current = null;
         // 轨迹只在事件边界刷新，避免与流式文本竞争渲染（状态隔离）
         void loadTrace(serverSessionRef.current[sessionId]);
+        void loadSubAgents();
       },
       onError: (err) => {
         cancelFlush();
@@ -486,7 +497,7 @@ export default function Home() {
     });
 
     abortRef.current = handle.abort;
-  }, [input, streaming, activeId, patchSession, patchMessage, loadTrace]);
+  }, [input, streaming, activeId, patchSession, patchMessage, loadTrace, loadSubAgents]);
 
   const stop = useCallback(() => {
     abortRef.current?.();
@@ -598,7 +609,10 @@ export default function Home() {
               </span>
               <span className="flex shrink-0 items-center gap-1 rounded border border-line-strong px-1.5 py-0.5 text-[11px] text-ink-caption">
                 <Users size={11} />
-                子智能体 0 个
+                子智能体 {subAgents.length} 个
+                {subAgents.filter((a) => a.status === "running").length > 0 ? (
+                  <span className="ml-0.5 h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+                ) : null}
               </span>
               {/* 预设与设置双向绑定：点击切换，设置里改动也会同步到这里 */}
               <Select
