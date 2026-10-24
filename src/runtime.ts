@@ -293,7 +293,16 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   tools.register(spawnTool);
 
   // --- 插件系统（Bundle / Patch / Loader + HMR）---
-  const pluginDir = process.env.LISH_PLUGINS_DIR ?? join(homedir(), ".lish", "plugins");
+  /*
+   * 插件目录。
+   *
+   * 命名统一为 LLISH_ 前缀（与其它变量一致）。
+   * 早期版本误用 LISH_PLUGINS_DIR（单 L），这里保留作为兼容回退。
+   */
+  const pluginDir =
+    process.env.LLISH_PLUGINS_DIR ??
+    process.env.LISH_PLUGINS_DIR ??
+    join(homedir(), ".lish", "plugins");
   const patchFiles: string[] = [];
   // 约定：~/.lish/plugins/*/patch.json 会被自动应用
   if (existsSync(pluginDir)) {
