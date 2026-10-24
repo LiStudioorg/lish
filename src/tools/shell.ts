@@ -12,6 +12,7 @@
 import { spawn } from "node:child_process";
 
 import type { ToolDefinition } from "../core/tools.js";
+import { getShellInfo, shellGuidance, type ShellInfo } from "./shell-detect.js";
 
 export interface ShellResult {
   command: string;
@@ -30,6 +31,8 @@ export interface RunShellOptions {
   timeoutMs?: number;
   /** stdout/stderr 各自最大字符数，默认 64KB */
   maxOutputChars?: number;
+  /** 显式指定 shell；缺省时使用跨平台探测结果 */
+  shell?: ShellInfo;
 }
 
 /** 执行一条命令并收集输出。 */
@@ -44,13 +47,22 @@ export function runShell(command: string, options: RunShellOptions): Promise<She
     let timedOut = false;
     let settled = false;
 
-    const child = spawn(command, {
-      cwd: options.cwd,
-      shell: true,
-      // 独立进程组：shell:true 时会先起一个 /bin/sh，
-      // 只有 detached 才能把它的子进程一起纳入同一个组。
-      detached: process.platform !== "win32",
-    });
+    // 跨平台 shell：Windows 优先 Git Bash（可直接跑 ls/grep），
+    // 找不到再降级 PowerShell，避免模型按 Unix 习惯下指令时卡死。
+    const shell = options.shell ?? getShellInfo();
+
+    const child = shell.path
+      ? spawn(shell.path, [...(shell.args ?? ["-c"]), command], {
+          cwd: options.cwd,
+          detached: process.platform !== "win32",
+        })
+      : spawn(command, {
+          cwd: options.cwd,
+          shell: true,
+          // 独立进程组：shell:true 时会先起一个 /bin/sh，
+          // 只有 detached 才能把它的子进程一起纳入同一个组。
+          detached: process.platform !== "win32",
+        });
 
     /** 结束并返回，最多只生效一次。 */
     function finish(code: number | null) {
@@ -112,10 +124,17 @@ export function runShell(command: string, options: RunShellOptions): Promise<She
  * 模型调用它时走的是同一条执行路径，因此同样受超时保护。
  */
 export function createShellTool(cwd: string, timeoutMs = 5000): ToolDefinition {
+  // 探测一次并缓存在闭包里：既避免每次调用都扫磁盘，
+  // 也让工具描述能声明「本环境有哪些命令可用」。
+  const shell = getShellInfo();
+  const guidance = shellGuidance(shell);
+
   return {
     name: "shell.run",
     description:
-      "在工作区目录下执行一条 shell 命令并返回输出（默认 5 秒超时）。请仅用于只读探查，如 ls、cat、grep。",
+      "在工作区目录下执行一条 shell 命令并返回输出（默认 5 秒超时）。" +
+      "请仅用于只读探查，如 ls、cat、grep。" +
+      (guidance ? `\n${guidance}` : ""),
     parameters: {
       type: "object",
       properties: {

@@ -27,6 +27,7 @@ import {
   type AgentToolResultPayload,
 } from "./core/agent-loop.js";
 import type { Runtime } from "./runtime.js";
+import type { TraceEvent } from "./core/trace.js";
 
 // --- 消息模型 -------------------------------------------------------------
 
@@ -141,6 +142,32 @@ export function App({ runtime }: AppProps) {
     };
   }, [runtime, push]);
 
+  /**
+   * 累计 Token：每一轮结束后从轨迹里汇总本会话的全部 step.thinking 事件。
+   *
+   * 直接读轨迹而不是自己维护计数器，好处是「/reset 开新会话」时
+   * 只要换一个 sessionId 统计自然归零，也不会漏掉多步循环里的中间调用。
+   */
+  const [usage, setUsage] = useState<{ input: number; output: number }>({
+    input: 0,
+    output: 0,
+  });
+
+  const refreshUsage = useCallback(
+    (sessionId: string) => {
+      const events: TraceEvent[] = runtime.listTraceEvents(sessionId);
+      let input = 0;
+      let output = 0;
+      for (const e of events) {
+        if (e.type !== "step.thinking") continue;
+        input += e.tokenUsage?.inputTokens ?? 0;
+        output += e.tokenUsage?.outputTokens ?? 0;
+      }
+      setUsage({ input, output });
+    },
+    [runtime],
+  );
+
   // Ctrl+C：忙碌时仅取消输入，空闲时退出
   useInput((_input, key) => {
     if (key.ctrl && _input === "c") {
@@ -163,6 +190,7 @@ export function App({ runtime }: AppProps) {
       if (text === "/reset") {
         sessionRef.current = runtime.sessions.create({ title: "tui session" });
         setEntries([]);
+        setUsage({ input: 0, output: 0 });
         push({ kind: "notice", text: "已开启新会话" });
         setInput("");
         return;
@@ -183,9 +211,10 @@ export function App({ runtime }: AppProps) {
         setBusy(false);
         setStatus("");
         setStepInfo("");
+        refreshUsage(sessionRef.current.id);
       }
     },
-    [busy, exit, push, runtime],
+    [busy, exit, push, runtime, refreshUsage],
   );
 
   // 计算可用高度，避免终端溢出后滚动错乱
@@ -231,6 +260,24 @@ export function App({ runtime }: AppProps) {
           placeholder={busy ? "等待上一轮完成…" : "输入消息"}
           focus={!busy}
         />
+      </Box>
+
+      {/*
+        底部状态栏：实时显示当前模型与累计 Token。
+        用分隔线与对话区分开，避免长的模型名挤占输入行。
+      */}
+      <Box marginTop={1} borderStyle="single" borderColor="gray" paddingX={1}>
+        <Text dimColor>模型 </Text>
+        <Text color="cyan">{runtime.config.model}</Text>
+        <Text dimColor>  ·  输入 </Text>
+        <Text>{formatTokens(usage.input)}</Text>
+        <Text dimColor>  ·  输出 </Text>
+        <Text>{formatTokens(usage.output)}</Text>
+        <Text dimColor>  ·  合计 </Text>
+        <Text color="green">
+          {formatTokens(usage.input + usage.output)}
+        </Text>
+        <Text dimColor>  ·  {busy ? "运行中" : "就绪"}</Text>
       </Box>
     </Box>
   );
@@ -288,6 +335,19 @@ function EntryView({ entry }: { entry: Entry }) {
         </Box>
       );
   }
+}
+
+/**
+ * 把 token 数量格式化成紧凑形式。
+ *
+ * 终端宽度宝贵，12,345 写成 12.3k 更易读；
+ * 小于 1000 时保持原样，避免 0 显示成 "0.0k"。
+ */
+function formatTokens(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return "0";
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
 // --- 启动 -----------------------------------------------------------------

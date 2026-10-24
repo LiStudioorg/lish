@@ -1,0 +1,160 @@
+"use client";
+
+/**
+ * 对话流式控制器。
+ *
+ * 职责：把 `streamChat` 的回调桥接到 Zustand store，并负责：
+ *   1. **16ms 合帧**：模型可能以毫秒级频率吐出 token，逐帧写 store 会造成
+ *      每秒上百次渲染。这里按 16ms 合并成一批再写，保证 60FPS。
+ *   2. **工具调用 id 归一**：后端可能不带 callId，这里退化到 name 并保证唯一。
+ *   3. **会话 id 同步**：后端在流开始时下发真实 sessionId，前端记录下来
+ *      用于后续轨迹查询（本地 id 只作为 React key）。
+ */
+
+import { streamChat, type ToolStreamEvent } from "./api";
+import { getStore } from "./store";
+
+/** 合帧间隔：约一帧（60FPS）。 */
+const FLUSH_MS = 16;
+
+/** 本地会话 id → 后端会话 id。 */
+const serverSessionIds = new Map<string, string>();
+
+/** 读取某本地会话对应的后端会话 id。 */
+export function serverSessionIdOf(localId: string | null): string | undefined {
+  return localId ? serverSessionIds.get(localId) : undefined;
+}
+
+/** 清空映射（测试用）。 */
+export function clearSessionIdMap(): void {
+  serverSessionIds.clear();
+}
+
+export interface SendHandle {
+  abort: () => void;
+}
+
+/**
+ * 发送一条消息。
+ *
+ * 返回 abort 句柄；调用方（输入框组件）负责把它存到 ref 以便「停止生成」。
+ */
+export function sendMessage(
+  text: string,
+  onSettled?: () => void,
+): SendHandle | null {
+  const trimmed = text.trim();
+  if (!trimmed || getStore().streaming) return null;
+
+  // 1. 落用户消息（store 会在无会话时自动建会话）
+  getStore().addUserMessage(trimmed);
+  const sessionId = getStore().activeId;
+  if (!sessionId) return null;
+
+  // 2. 占位助手消息
+  getStore().startAssistant();
+  getStore().setInput("");
+  getStore().setStreaming(true);
+
+  // 3. 合帧缓冲
+  let pending = "";
+  let timer: number | null = null;
+
+  const flush = () => {
+    timer = null;
+    if (!pending) return;
+    const chunk = pending;
+    pending = "";
+    getStore().appendDelta(chunk);
+  };
+
+  const cancelFlush = () => {
+    if (timer !== null) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    flush();
+  };
+
+  const onText = (delta: string) => {
+    pending += delta;
+    if (timer === null) timer = window.setTimeout(flush, FLUSH_MS);
+  };
+
+  /** 记录本批已出现的 callId，用于补齐缺失 id 时的唯一化。 */
+  const seen = new Set<string>();
+
+  const onEvent = (event: ToolStreamEvent) => {
+    if (event.type === "session" && event.sessionId) {
+      serverSessionIds.set(sessionId, event.sessionId);
+      return;
+    }
+
+    if (event.type === "tool_call") {
+      const base = event.callId ?? event.name ?? "tool";
+      let id = base;
+      let n = 1;
+      while (seen.has(id)) id = `${base}#${n++}`;
+      seen.add(id);
+      getStore().upsertToolCall({
+        id,
+        name: event.name ?? "tool",
+        argsJson: event.argsJson,
+        status: "running",
+      });
+      return;
+    }
+
+    if (event.type === "tool_result") {
+      // 优先按 callId 匹配；缺失时回退到「最后一个同名且仍在跑」的调用
+      const calls = getStore()
+        .sessions.find((s) => s.id === sessionId)
+        ?.messages.at(-1)?.toolCalls;
+      let id = event.callId ?? "";
+      if (!id || !calls?.some((c) => c.id === id)) {
+        const running = [...(calls ?? [])]
+          .reverse()
+          .find((c) => c.status === "running" && c.name === event.name);
+        id = running?.id ?? "";
+      }
+      if (!id) return;
+      getStore().upsertToolCall({
+        id,
+        content: event.content ?? "",
+        isError: event.isError,
+        durationMs: event.durationMs,
+        status: event.isError ? "error" : "done",
+      });
+    }
+  };
+
+  const finish = (info: { stopReason?: string; error?: string }) => {
+    cancelFlush();
+    const state = getStore();
+    // 把仍在 running 的调用收尾，避免永远转圈
+    const lastCalls =
+      state.sessions.find((s) => s.id === sessionId)?.messages.at(-1)?.toolCalls ??
+      [];
+    for (const c of lastCalls) {
+      if (c.status === "running") {
+        state.upsertToolCall({
+          id: c.id,
+          content: c.content || "（未返回结果）",
+          status: "error",
+        });
+      }
+    }
+    getStore().finishAssistant(info);
+    getStore().setStreaming(false);
+    onSettled?.();
+  };
+
+  const handle = streamChat(trimmed, serverSessionIds.get(sessionId) ?? null, {
+    onText,
+    onEvent,
+    onDone: finish,
+    onError: (err) => finish({ error: err.message }),
+  });
+
+  return { abort: handle.abort };
+}

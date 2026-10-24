@@ -504,7 +504,7 @@ export function createApp(runtime: Runtime): express.Express {
 
     const baseURL = str("baseURL")?.trim();
     if (baseURL !== undefined && baseURL.length > 0 && !/^https?:\/\//i.test(baseURL)) {
-      res.status(400).json({ error: `baseURL 必须是 http(s) 地址：${baseURL}` });
+      res.status(400).json({ ok: false, error: `baseURL 必须是 http(s) 地址：${baseURL}` });
       return;
     }
 
@@ -698,11 +698,11 @@ export function createApp(runtime: Runtime): express.Express {
     const apiKey = pickString(body.apiKey) || runtime.config.apiKey;
 
     if (!apiKey) {
-      res.status(400).json({ error: "缺少 API Key，请先在设置中填写" });
+      res.status(400).json({ ok: false, error: "缺少 API Key，请先在设置中填写" });
       return;
     }
     if (!/^https?:\/\//i.test(baseURL)) {
-      res.status(400).json({ error: `baseURL 不合法：${baseURL}` });
+      res.status(400).json({ ok: false, error: `baseURL 不合法：${baseURL}` });
       return;
     }
 
@@ -743,7 +743,7 @@ export function createApp(runtime: Runtime): express.Express {
   app.post("/api/chat", async (req: Request, res: Response) => {
     const message = extractUserMessage(req.body);
     if (message.length === 0) {
-      res.status(400).json({ error: "message 不能为空" });
+      res.status(400).json({ ok: false, error: "message 不能为空" });
       return;
     }
 
@@ -754,6 +754,9 @@ export function createApp(runtime: Runtime): express.Express {
       ? runtime.sessions.get(requestedSessionId) ??
         runtime.sessions.create({ id: requestedSessionId, title: "web session" })
       : runtime.sessions.create({ title: "web session" });
+
+    // 注入当前 Agent 预设的 System Prompt（真正影响模型行为，而非只改名字）
+    runtime.applyPreset(session.id);
 
     // AI SDK v4：在 execute 中拿到 writer，工具事件走侧通道（data: 帧），
     // 正文走 pipe 的文本流，前端 useChat 可直接消费。

@@ -102,6 +102,67 @@ test("并发派发多个子代理不冲突（AsyncLocalStorage 隔离）", async
   await rt.shutdown();
 });
 
+test("并发子代理的 Session 日志与 Trace 轨迹深度隔离，不串数据", async () => {
+  const rt = await createRuntime(baseConfig());
+
+  // 并发派生 4 个子代理，每个的任务描述互不相同
+  const tasks = Array.from({ length: 4 }, (_, i) => `唯一任务标记-${i}`);
+  await Promise.all(
+    tasks.map((task, i) =>
+      rt.tools.executeTool("spawn_agent", { role: `唯一角色-${i}`, task }),
+    ),
+  );
+
+  const agents = rt.listSubAgents();
+  assert.equal(agents.length, 4, "每个任务都应生成一条记录");
+
+  // 1. Session 隔离：每个子代理的会话里只能看到自己的任务，不能出现别人的
+  for (const agent of agents) {
+    const session = rt.sessions.get(agent.sessionId);
+    assert.ok(session, `子代理 ${agent.role} 应有独立会话`);
+    const text = session.log
+      .map((e) => ("content" in e ? String(e.content ?? "") : ""))
+      .join("\n");
+    assert.ok(
+      text.includes(agent.task),
+      `会话里应包含自己的任务（${agent.task}）`,
+    );
+    for (const other of tasks) {
+      if (other === agent.task) continue;
+      assert.equal(
+        text.includes(other),
+        false,
+        `会话 ${agent.sessionId} 不应出现其它子代理的任务 ${other}`,
+      );
+    }
+  }
+
+  // 2. Trace 隔离：每个 traceId 只属于一条记录
+  const traceIds = agents.map((a) => a.traceId).filter(Boolean);
+  assert.equal(
+    new Set(traceIds).size,
+    traceIds.length,
+    "并发派生的 traceId 必须互不相同",
+  );
+
+  // 3. 轨迹事件归属：某条轨迹里的事件不应指向别的子代理会话
+  for (const agent of agents) {
+    const events = rt.listTraceEvents(agent.sessionId);
+    for (const e of events) {
+      assert.equal(
+        e.sessionId,
+        agent.sessionId,
+        `轨迹事件 ${e.id} 串到了别的会话`,
+      );
+    }
+  }
+
+  // 4. 深度栈不串：每个子代理都从深度 1 开始，因此都能再派一层
+  assert.equal(new Set(agents.map((a) => a.sessionId)).size, 4);
+
+  await rt.shutdown();
+});
+
 test("子代理记录带独立 traceId 且互不相同", async () => {
   const rt = await createRuntime(baseConfig());
   await rt.tools.executeTool("spawn_agent", { role: "a", task: "t1" });

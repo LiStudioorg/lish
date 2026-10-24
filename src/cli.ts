@@ -28,6 +28,7 @@ import { fileURLToPath } from "node:url";
 import { Command, Option } from "commander";
 
 import { createRuntime, readConfig, UsageError } from "./runtime.js";
+import { checkForUpdate, formatUpdateHint } from "./core/update-check.js";
 
 // --- 终端颜色（非 TTY 或 NO_COLOR 时降级）---------------------------------
 
@@ -169,7 +170,27 @@ export function buildProgram(): Command {
 }
 
 /** 程序入口；返回退出码。 */
+/**
+ * 在后台检查更新并打印提示。
+ *
+ * **刻意不 await**：网络查询最多耗时 1.5 秒，若阻塞主流程，
+ * 用户会明显感觉到启动变慢。这里让它自己跑，成功则补一行提示。
+ */
+function scheduleUpdateCheck(): void {
+  // 帮助/版本这类一次性命令没必要打扰用户
+  checkForUpdate()
+    .then((info) => {
+      if (!info) return;
+      // 用 stderr 输出：不污染需要被管道消费的 stdout
+      console.error(yellow(formatUpdateHint(info)));
+    })
+    .catch(() => {
+      /* 任何异常都静默：版本检测永远不该影响主流程 */
+    });
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+  scheduleUpdateCheck();
   const program = buildProgram();
   try {
     await program.parseAsync(["node", "lish", ...argv]);

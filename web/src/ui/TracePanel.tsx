@@ -30,7 +30,8 @@ import {
   XCircle,
 } from "lucide-react";
 
-import type { TraceEvent, SubAgentRecord } from "../lib/api";
+import type { TraceEvent } from "../lib/api";
+import { useAppStore } from "../lib/store";
 import { ErrorBoundary } from "./ErrorBoundary";
 
 // --- 工具函数 -------------------------------------------------------------
@@ -273,17 +274,16 @@ function DetailContent({ tab, event }: { tab: DetailTab; event: TraceEvent }) {
 
 // --- 主面板 ---------------------------------------------------------------
 
-export function TracePanel({
-  events,
-  subAgents = [],
-  onSelectSubAgent,
-}: {
-  events: TraceEvent[];
-  /** 当前运行中的子代理（用于分组展示与切换） */
-  subAgents?: SubAgentRecord[];
-  /** 切换查看某个子代理的轨迹 */
-  onSelectSubAgent?: (sessionId: string) => void;
-}) {
+/**
+ * 轨迹面板。
+ *
+ * 数据直接订阅 Zustand store，不再由父级层层传 props：
+ *   轨迹只在一次 run 结束后批量写入，因此这里的重渲染频率天然很低，
+ *   不会与流式打字竞争。
+ */
+export function TracePanel() {
+  const events = useAppStore((s) => s.traceEvents);
+  const subAgents = useAppStore((s) => s.subAgents);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tab, setTab] = useState<DetailTab>("summary");
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -332,7 +332,16 @@ export function TracePanel({
                 <button
                   key={a.id}
                   type="button"
-                  onClick={() => onSelectSubAgent?.(a.sessionId)}
+                  onClick={() => {
+                    // 点击子代理：拉取它自己的轨迹（通过 store action 切换数据源）
+                    const state = useAppStore.getState();
+                    state.setMainTab("trace");
+                    void import("../lib/api").then(({ fetchTraceEvents }) =>
+                      fetchTraceEvents(a.sessionId).then((r) => {
+                        if (r.ok) state.setTraceEvents(r.events);
+                      }),
+                    );
+                  }}
                   title={`${a.role} · ${a.task}`}
                   className={`flex max-w-full items-center gap-1 rounded border px-1.5 py-0.5 text-[10.5px] transition-colors ${
                     a.status === "running"

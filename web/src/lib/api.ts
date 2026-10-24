@@ -346,19 +346,22 @@ export async function updateConfig(
 
 // --- 应用配置（权限 / 插件 / 外观）----------------------------------------
 
-export type PermissionMode = "workspace" | "full";
-export type ThemeMode = "light" | "dark" | "system";
-export type FontSize = "small" | "medium" | "large";
-export type AgentPreset = "standard" | "minimal" | "creative";
-export type PluginId = "fs-tools" | "shell" | "echo-tool" | "session-log";
+/**
+ * 设置类型统一来自 `lib/settings.ts`（单一真源）。
+ * 这里只做再导出，方便 API 调用方就近引用。
+ */
+export type {
+  AppSettings,
+  PermissionMode,
+  ThemeMode,
+  FontSize,
+  AgentPreset,
+} from "./settings";
 
-export interface AppSettings {
-  permission: PermissionMode;
-  theme: ThemeMode;
-  fontSize: FontSize;
-  agentPreset: AgentPreset;
-  plugins: Record<PluginId, boolean>;
-}
+import type { AppSettings } from "./settings";
+
+/** 可由设置面板切换的内置插件。 */
+export type PluginId = "fs-tools" | "shell" | "echo-tool" | "session-log";
 
 /** 提交应用配置（与 LLM 配置共用 /api/config）。 */
 export async function updateAppSettings(

@@ -16,7 +16,13 @@ import { dirname, join } from "node:path";
 export type PermissionMode = "workspace" | "full";
 export type ThemeMode = "light" | "dark" | "system";
 export type FontSize = "small" | "medium" | "large";
-export type AgentPreset = "standard" | "minimal" | "creative";
+/**
+ * Agent 预设。
+ *
+ * 注意：这里只是**枚举值**，真正的行为差异由 `core/presets.ts` 注入的
+ * System Prompt 决定。新增预设必须同时在两处登记。
+ */
+export type AgentPreset = "standard" | "review" | "minimal" | "creative";
 
 /** 可由用户切换的内置插件。 */
 export type PluginId = "fs-tools" | "shell" | "echo-tool" | "session-log";

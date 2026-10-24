@@ -31,7 +31,10 @@
     "test:config": "tsx src/core/test-config.ts",
     "build:assets": "node scripts/copy-web-assets.mjs",
     "prepare": "npm run build:web:ci && npm run build:cli && npm run build:assets",
-    "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build"
+    "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build",
+    "test:store": "cd web && tsx tests/store.test.ts",
+    "test:shell": "tsx src/tools/test-shell-detect.ts",
+    "test:presets": "tsx src/core/test-presets.ts"
   },
   "repository": {
     "type": "git",

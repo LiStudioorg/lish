@@ -99,8 +99,8 @@ curl -X POST http://127.0.0.1:3000/api/providers/activate \
 
 ### 1.4 成功响应约定
 
-所有非流式接口都返回 JSON 对象，并在顶层携带 `ok` 字段（`/api/config`、`/api/models` 除外，
-其成功即 `2xx` 且不带 `error` 字段）。
+所有非流式接口都返回 JSON 对象，并在顶层携带 `ok` 字段；
+**错误响应同样带 `ok: false`**，前端可据此统一判定，无需依赖状态码分支。
 
 ```json
 { "ok": true, "...": "业务字段" }
@@ -131,7 +131,6 @@ curl -X POST http://127.0.0.1:3000/api/providers/activate \
 ```
 
 > `/api/chat` 例外：它走 SSE 流，错误以流内 `3:` 帧或 HTTP 状态码表达（见 8.4）。
-> `/api/config` 与 `/api/models` 使用 `{ "error": "..." }`（不含 `ok`），保留历史兼容。
 
 ### 2.2 状态码语义
 
@@ -397,10 +396,10 @@ curl -X POST http://127.0.0.1:3000/api/models \
 
 | 状态码 | 条件 | 响应体示例 |
 | --- | --- | --- |
-| `400` | 缺 API Key | `{"error":"缺少 API Key，请先在设置中填写"}` |
-| `400` | `baseUrl` 非法 | `{"error":"baseURL 不合法：..."}` |
-| `502` | 上游非 2xx | `{"error":"上游返回 401","detail":"{\"error\":...}"}` |
-| `502` | 超时 / 网络失败 | `{"error":"请求超时（10s）"}` 或 `{"error":"无法连接模型服务"}` |
+| `400` | 缺 API Key | `{"ok":false,"error":"缺少 API Key，请先在设置中填写"}` |
+| `400` | `baseUrl` 非法 | `{"ok":false,"error":"baseURL 不合法：..."}` |
+| `502` | 上游非 2xx | `{"ok":false,"error":"上游返回 401","detail":"{\"error\":...}"}` |
+| `502` | 超时 / 网络失败 | `{"ok":false,"error":"请求超时（10s）"}` 或 `{"ok":false,"error":"无法连接模型服务"}` |
 
 **前端降级约定**：任一错误都必须把模型输入框还原为**文本输入**，
 并展示「获取失败，请手动输入模型名」。

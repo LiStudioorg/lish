@@ -1,0 +1,212 @@
+"use client";
+
+/**
+ * 对话区组件：工具卡片、消息气泡、下拉选择器。
+ *
+ * 从原 page.tsx 拆出，目的是让每个组件只订阅自己需要的状态切片，
+ * 并统一用 memo 隔离流式渲染。
+ */
+
+import { memo, useState } from "react";
+import { Check, ChevronDown, ChevronRight, Wrench } from "lucide-react";
+import { motion } from "framer-motion";
+
+import type { ChatMessage, ToolCall } from "../lib/store";
+
+/** 可折叠的工具调用卡片。 */
+export const ToolCard = memo(function ToolCard({ call }: { call: ToolCall }) {
+  const [open, setOpen] = useState(false);
+
+  /** 参数美化：无效 JSON 时原样展示，绝不抛错。 */
+  const prettyArgs = (() => {
+    if (!call.argsJson) return "（无参数）";
+    try {
+      return JSON.stringify(JSON.parse(call.argsJson), null, 2);
+    } catch {
+      return call.argsJson;
+    }
+  })();
+
+  return (
+    <div className="w-full max-w-[520px] overflow-hidden rounded-lg border border-line bg-layer1/60">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] transition-colors hover:bg-white/[0.03]"
+      >
+        <Wrench size={13} className="shrink-0 text-ink-caption" />
+        <span className="font-mono text-ink-2">{call.name}</span>
+        {call.status === "running" ? (
+          <span className="flex items-center gap-1 text-[11px] text-amber-400/90">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+            执行中
+          </span>
+        ) : call.isError ? (
+          <span className="text-[11px] text-red-400">失败</span>
+        ) : (
+          <span className="flex items-center gap-1 text-[11px] text-emerald-400/90">
+            <Check size={11} />
+            完成
+            {call.durationMs !== undefined ? (
+              <span className="text-ink-caption">{call.durationMs}ms</span>
+            ) : null}
+          </span>
+        )}
+        <span className="ml-auto text-ink-caption">
+          {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        </span>
+      </button>
+
+      {open ? (
+        <div className="space-y-2 border-t border-line px-3 py-2">
+          <div>
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-caption">
+              参数
+            </div>
+            <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-ink-3">
+              {prettyArgs}
+            </pre>
+          </div>
+          {call.status !== "running" ? (
+            <div>
+              <div className="mb-1 text-[10px] uppercase tracking-wide text-ink-caption">
+                结果
+              </div>
+              <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded bg-black/30 p-2 font-mono text-[11px] text-ink-3">
+                {call.content || "（空）"}
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+});
+
+/**
+ * 消息气泡。
+ *
+ * 用 memo + 引用比较：只有内容真正变化时才重渲染。
+ * 流式打字时每条历史消息的 props 引用不变，因此不会被重建。
+ */
+export const MessageView = memo(
+  function MessageView({ message }: { message: ChatMessage }) {
+    const isUser = message.role === "user";
+
+    return (
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.18, ease: "easeOut" }}
+        className={`w-full ${isUser ? "flex justify-end" : "flex justify-start"}`}
+      >
+        <div
+          className={
+            isUser ? "max-w-[min(80%,56ch)] min-w-0" : "min-w-0 w-full max-w-[820px]"
+          }
+        >
+          {isUser ? (
+            <div className="w-fit max-w-full whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-line-strong bg-layer2 px-3.5 py-2 text-[13px] leading-[1.65] text-ink">
+              {message.content}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {message.toolCalls.map((call) => (
+                <ToolCard key={call.id} call={call} />
+              ))}
+              {message.content ? (
+                <div
+                  className={`whitespace-pre-wrap break-words text-[13px] leading-[1.65] text-ink-2 ${
+                    message.streaming ? "lish-cursor" : ""
+                  }`}
+                >
+                  {message.content}
+                </div>
+              ) : message.streaming && message.toolCalls.length === 0 ? (
+                <div className="flex items-center gap-2 text-[13px] text-ink-caption">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-soft" />
+                  思考中…
+                </div>
+              ) : null}
+              {message.error ? (
+                <div className="rounded-lg border border-red-900/60 bg-red-950/30 px-3 py-2 text-[12px] text-red-300">
+                  {message.error}
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+      </motion.div>
+    );
+  },
+  (a, b) => a.message === b.message,
+);
+
+/** 轻量下拉选择器（无需额外依赖）。 */
+export function Select<T extends string>({
+  value,
+  options,
+  onChange,
+  icon,
+  title,
+}: {
+  value: T;
+  options: { value: T; label: string }[];
+  onChange: (v: T) => void;
+  icon?: React.ReactNode;
+  title?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const current = options.find((o) => o.value === value) ?? options[0];
+
+  return (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        title={title}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex max-w-[130px] items-center gap-1.5 rounded-lg border border-line-strong px-2 py-1 text-[11.5px] text-ink-3 transition-colors hover:bg-white/[0.04] hover:text-ink-2 sm:max-w-none"
+      >
+        {icon}
+        <span className="truncate whitespace-nowrap">{current?.label ?? ""}</span>
+        <ChevronDown size={11} className="shrink-0" />
+      </button>
+      {open ? (
+        <>
+          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+          <motion.div
+            initial={{ opacity: 0, y: 4, scale: 0.98 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.12, ease: "easeOut" }}
+            role="listbox"
+            className="absolute bottom-full left-0 z-20 mb-1 min-w-[160px] overflow-hidden rounded-lg border border-line-strong bg-layer1 py-1 shadow-xl"
+          >
+            {options.map((o) => (
+              <button
+                key={o.value}
+                type="button"
+                role="option"
+                aria-selected={value === o.value}
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-ink-3 transition-colors hover:bg-white/[0.06] hover:text-ink"
+              >
+                <span className="w-3 shrink-0">
+                  {value === o.value ? (
+                    <Check size={11} className="text-brand-soft" />
+                  ) : null}
+                </span>
+                {o.label}
+              </button>
+            ))}
+          </motion.div>
+        </>
+      ) : null}
+    </div>
+  );
+}

@@ -36,6 +36,8 @@ const suites: Suite[] = [
   { name: "trace", file: "src/core/test-trace.ts" },
   { name: "subagent", file: "src/core/test-subagent.ts" },
   { name: "config", file: "src/core/test-config.ts" },
+  { name: "shell", file: "src/tools/test-shell-detect.ts" },
+  { name: "presets", file: "src/core/test-presets.ts" },
 ];
 
 interface SuiteResult {

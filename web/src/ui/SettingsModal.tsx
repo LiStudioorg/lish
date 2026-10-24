@@ -7,7 +7,7 @@
  *   通用设置 / 模型 / 内置插件 / Agent 预设
  */
 
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import {
   Bot,
   Check,
@@ -39,27 +39,21 @@ import {
   type ProviderInfo,
 } from "../lib/api";
 
-export type ThemeMode = "light" | "dark" | "system";
-export type PermissionMode = "workspace" | "full";
-export type FontSize = "small" | "medium" | "large";
-export type AgentPreset = "standard" | "minimal" | "creative";
+/**
+ * 设置类型统一来自 `lib/settings.ts`，此处只做再导出，
+ * 避免出现两份定义导致 preset 等枚举不一致。
+ */
+export type {
+  ThemeMode,
+  PermissionMode,
+  FontSize,
+  AgentPreset,
+  AppSettings,
+} from "../lib/settings";
+export { defaultSettings } from "../lib/settings";
 
-export interface AppSettings {
-  permission: PermissionMode;
-  theme: ThemeMode;
-  fontSize: FontSize;
-  agentPreset: AgentPreset;
-  /** 内置插件的启用状态 */
-  plugins: Record<string, boolean>;
-}
-
-export const defaultSettings: AppSettings = {
-  permission: "workspace",
-  theme: "dark",
-  fontSize: "medium",
-  agentPreset: "standard",
-  plugins: { "fs-tools": true, shell: true, "echo-tool": true, "session-log": true },
-};
+import { PRESET_META, type AppSettings } from "../lib/settings";
+import { useAppStore } from "../lib/store";
 
 const TABS = [
   { id: "general", label: "通用设置", icon: Settings2 },
@@ -71,11 +65,8 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-const PRESETS: { id: AgentPreset; name: string; desc: string; badge?: string }[] = [
-  { id: "standard", name: "标准模式", desc: "平衡质量与速度，适合日常开发任务", badge: "推荐" },
-  { id: "minimal", name: "极简模式", desc: "只回复必要内容，不主动调用工具" },
-  { id: "creative", name: "创造模式", desc: "更发散的表达，适合头脑风暴与设计" },
-];
+/** 预设元信息统一来自 lib/settings，保证与状态栏下拉完全一致。 */
+const PRESETS = PRESET_META;
 
 /** 单选行。 */
 function RadioRow({
@@ -177,7 +168,6 @@ export function SettingsModal({
   const [tab, setTab] = useState<TabId>("general");
 
   // 模型相关（服务端配置）
-  const [server, setServer] = useState<ServerConfig | null>(null);
   const [maxSteps, setMaxSteps] = useState(8);
   const [maxStepsMsg, setMaxStepsMsg] = useState("");
   const [saving, setSaving] = useState(false);
@@ -209,40 +199,39 @@ export function SettingsModal({
   const [pluginsLoading, setPluginsLoading] = useState(false);
   const [reloadingId, setReloadingId] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    void fetchConfig().then((cfg) => {
-      if (!alive || !cfg) return;
-      setServer(cfg);
-      setMaxSteps(cfg.maxSteps);
-      setProviders(cfg.providers ?? []);
-      setActiveProviderId(cfg.activeProviderId);
+  /**
+   * 打开弹窗时把 store 里的配置同步为本地草稿。
+   *
+   * 同步动作放在 `open` 变化的**渲染期**（React 官方的「派生 state」模式）：
+   * 用上一次的 open 值做比较，只在 false→true 那一帧调整一次，
+   * 既不触发级联渲染，也避免 setTimeout 之类的时序把戏。
+   */
+  const [wasOpen, setWasOpen] = useState(false);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      const cfg = useAppStore.getState().serverCfg;
+      if (cfg) {
+        setMaxSteps(cfg.maxSteps);
+        setProviders(cfg.providers ?? []);
+        setActiveProviderId(cfg.activeProviderId);
+      }
       setMessage(null);
       setMaxStepsMsg("");
       setEditingId(null);
       setModelOptions(null);
       setModelHint("");
-    });
-    return () => {
-      alive = false;
-    };
-  }, [open]);
+    }
+  }
 
-  // 切到插件管理页时拉取列表
-  useEffect(() => {
-    if (!open || tab !== "manage") return;
-    let alive = true;
+  /** 切到插件管理页时拉取列表（在点击回调里触发，不在 effect 里同步 setState）。 */
+  const loadPluginList = useCallback(() => {
     setPluginsLoading(true);
     void fetchPlugins().then((r) => {
-      if (!alive) return;
       setPlugins(r.plugins);
       setPluginsLoading(false);
     });
-    return () => {
-      alive = false;
-    };
-  }, [open, tab]);
+  }, []);
 
   /** 热重载一个插件（或全部）。 */
   const doReload = async (id?: string) => {
@@ -393,21 +382,32 @@ export function SettingsModal({
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
       onClick={onClose}
     >
+      {/*
+        窄屏（<640px）改为竖排：导航变成顶部横向 Tab 条，
+        内容区占满剩余高度。这样在 390px 宽的手机上不会出现
+        「左侧 168px 固定列把内容挤到只剩 200px」的折行灾难。
+      */}
       <div
-        className="flex h-[560px] w-full max-w-[820px] overflow-hidden rounded-xl border border-line-strong bg-layer1 shadow-[0_24px_70px_rgba(0,0,0,0.6)]"
+        className="flex h-[min(560px,calc(100dvh-2rem))] w-full max-w-[820px] flex-col overflow-hidden rounded-xl border border-line-strong bg-layer1 shadow-[0_24px_70px_rgba(0,0,0,0.6)] sm:flex-row"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 左侧导航 */}
-        <nav className="flex w-[168px] shrink-0 flex-col border-r border-line bg-sidebar py-3">
-          <div className="px-4 pb-3 text-[12px] font-medium text-ink-3">设置</div>
+        <nav className="flex shrink-0 gap-0.5 overflow-x-auto border-b border-line bg-sidebar p-2 sm:w-[168px] sm:flex-col sm:gap-0 sm:overflow-visible sm:border-b-0 sm:border-r sm:py-3 sm:px-0">
+          <div className="hidden px-4 pb-3 text-[12px] font-medium text-ink-3 sm:block">
+            设置
+          </div>
           {TABS.map((t) => {
             const Icon = t.icon;
             return (
               <button
                 key={t.id}
                 type="button"
-                onClick={() => setTab(t.id)}
-                className={`mx-2 flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors ${
+                onClick={() => {
+                  setTab(t.id);
+                  // 插件管理页按需加载列表（在交互回调里发起，避免 effect 内 setState）
+                  if (t.id === "manage" && plugins.length === 0) loadPluginList();
+                }}
+                className={`mx-1 flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors sm:mx-2 sm:gap-2 ${
                   tab === t.id
                     ? "bg-white/[0.08] text-ink"
                     : "text-ink-3 hover:bg-white/[0.04] hover:text-ink-2"

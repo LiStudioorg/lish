@@ -29,6 +29,7 @@ import {
   SubAgentRegistry,
   type SubAgentRecord,
 } from "./core/sub-agent.js";
+import { presetPromptOf } from "./core/presets.js";
 import { PluginHotReloader } from "./core/plugins/hot-reload.js";
 import { discoverPlugins, ensurePluginDir } from "./core/plugins/discover.js";
 import type { LoadedPluginInfo } from "./core/plugins/loader.js";
@@ -367,6 +368,8 @@ export interface Runtime {
   getSettings(): AppSettings;
   /** 合并并持久化应用配置，同时让工具注册即时生效。 */
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
+  /** 把当前 Agent 预设注入指定会话的 system prompt。 */
+  applyPreset(sessionId: string): void;
   /** 工作区根目录（文件树与终端的工作目录）。 */
   workspaceRoot: string;
   /** 当前已加载的插件列表。 */
@@ -530,6 +533,54 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
   // Agent 循环
   const agent = new AgentLoop(ctx, { maxSteps: config.maxSteps, traceStore });
   ctx.provide(AgentLoop.KEY, agent);
+
+  /**
+   * 把当前预设注入到会话的 system prompt。
+   *
+   * 实现要点：
+   *   - 预设作为一条带标记的 `message.system` 消息追加到会话；
+   *   - 切换预设时先删掉旧的预设消息再追加新的，避免多条预设叠加；
+   *   - 会话是 append-only 的，因此"删除"表现为追加一条覆盖指令之外的
+   *     一次性重建（见下面的 rebuildPresetMessages）。
+   *
+   * 之所以在会话级别而不是全局变量里保存：并发的多个会话可能用不同预设，
+   * 必须互不干扰。
+   */
+  const presetPromptCache = new Map<string, string>();
+
+  /** 计算当前应注入的预设文本。 */
+  const currentPresetPrompt = (): string => presetPromptOf(appSettings.agentPreset);
+
+  /**
+   * 确保会话的 system 消息与当前预设一致。
+   *
+   * 会话日志是 append-only 的，所以这里采取"追加 + 去重"策略：
+   * 若已存在标记消息且内容相同则不做事；否则追加新的一条，
+   * 并在构建消息数组时由 `hoistSystemPrompt` 合并（后者会保留全部正文）。
+   * 为避免重复内容膨胀，追加前会记录本会话当前生效的预设文本。
+   */
+  const applyPresetToSession = (sessionId: string): void => {
+    const session = sessions.get(sessionId);
+    if (!session) return;
+    const wanted = currentPresetPrompt();
+    const previous = presetPromptCache.get(sessionId) ?? "";
+
+    // 预设没变 → 不重复写日志
+    if (wanted === previous) return;
+    presetPromptCache.set(sessionId, wanted);
+
+    // 无预设（理论上不会发生，standard 也有正文）→ 只清缓存
+    if (!wanted) return;
+
+    // 已有同内容的标记消息 → 不重复追加
+    const exists = session.log.some(
+      (e) =>
+        e.type === "message.system" &&
+        typeof e.content === "string" &&
+        e.content === wanted,
+    );
+    if (!exists) session.appendSystemMessage(wanted);
+  };
 
   /*
    * 子智能体：通过 spawn_agent 工具暴露。
@@ -813,9 +864,18 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     getSettings() {
       return appSettings;
     },
+    /** 在会话开跑前把当前预设注入 system prompt（由 server / TUI 调用）。 */
+    applyPreset(sessionId: string) {
+      applyPresetToSession(sessionId);
+    },
     async updateSettings(patch: Partial<AppSettings>) {
       appSettings = mergeSettings(appSettings, patch);
       syncTools();
+      // 预设切换：让所有已有会话在下一轮重新同步
+      presetPromptCache.clear();
+      for (const sessionId of sessions.list()) {
+        applyPresetToSession(sessionId);
+      }
       try {
         await saveSettings(appSettings);
       } catch {
