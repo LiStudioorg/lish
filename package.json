@@ -30,8 +30,9 @@
     "test:subagent": "tsx src/core/test-subagent.ts",
     "build:assets": "node scripts/copy-web-assets.mjs",
     "install:web": "cd web && npm install --no-audit --no-fund",
-    "prepare": "npm run install:root && npm run install:web && npm run build",
-    "install:root": "npm install --no-audit --no-fund --ignore-scripts"
+    "prepare": "node scripts/ensure-root-deps.mjs && npm run build:web:ci && npm run build:cli && npm run build:assets",
+    "install:root": "npm install --no-audit --no-fund --ignore-scripts",
+    "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build"
   },
   "repository": {
     "type": "git",
