@@ -38,6 +38,7 @@ const suites: Suite[] = [
   { name: "config", file: "src/core/test-config.ts" },
   { name: "shell", file: "src/tools/test-shell-detect.ts" },
   { name: "presets", file: "src/core/test-presets.ts" },
+  { name: "memory", file: "src/core/test-memory.ts" },
 ];
 
 interface SuiteResult {

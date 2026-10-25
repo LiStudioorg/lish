@@ -23,6 +23,7 @@
 - [系统架构](#系统架构)
 - [环境要求](#环境要求)
 - [安装](#安装)
+- [版本发布说明](#版本发布说明)
 - [快速开始](#快速开始)
 - [命令参考](#命令参考)
 - [配置](#配置)
@@ -160,6 +161,84 @@ SSE 推送：`0:` 文本帧（打字机） + `2:` 数据帧（工具事件）
 
 ---
 
+## 版本发布说明
+
+### v0.1.0-beta.1（当前 · `latest`）
+
+首个 Beta 版本，覆盖此前全部 alpha 版本的迭代，**是一次完整的前端重构 + 核心链路补齐**。
+
+**架构重构**
+
+- 引入 **Zustand** 全局状态管理：会话、配置、当前模型、轨迹面板数据统一收口；
+  组件按切片订阅，高频流式打字时只有消息区重渲染，侧边栏/右侧面板/设置弹窗完全不受影响。
+- 流式输出按 **16ms 合帧**写入状态，配合消息级 `memo` 与引用比较，把「每条消息都重渲染」压到「只有正在生成的那条」。
+- 清理脚手架遗留：删除 5 个无用的示例 SVG，合并 3 处重复的 `AppSettings` / 预设定义，消除 `page.tsx` 内重复的类型声明。
+
+**新功能**
+
+| 能力 | 说明 |
+| --- | --- |
+| 多模型渠道 | 一个渠道可保存**多个模型**（如 DeepSeek 的 chat + reasoner）；渠道可添加任意多个 |
+| 渠道预设 | DeepSeek / OpenAI / Anthropic / Kimi / Ollama / 自定义，选中即自动填 Base URL，只需填 Key |
+| 模型切换 | 聊天界面底部列出**所有渠道的全部模型**，选中即热切换（跨渠道会自动激活对应渠道） |
+| 长对话分页 | 默认只渲染最近 20 条，向上滚动自动加载更早，滚动位置严格锚定不跳动 |
+| 全屏设置 | IDE 风格全屏面板，桌面左侧导航 + 右侧内容，移动端底部 Tab，绝无横向滚动 |
+| **跨平台 Shell 探测** | Windows 优先 Git Bash（可直接跑 `ls`/`grep`），找不到降级 PowerShell，再退回 `cmd`；`LISH_SHELL` 可强制指定 |
+| **启动版本检测** | 异步查询 npm registry（1.5s 超时），发现新版本时提示更新命令，**绝不阻塞主进程** |
+| **Agent 预设落地** | 标准 / 代码审查 / 极简 / 创造四种预设，各自注入**不同的 System Prompt**，而非只改显示名称 |
+| TUI 状态栏 | 底部实时显示当前模型名与输入/输出/合计 Token 消耗 |
+| 界面动效 | 消息入场、侧边栏切换、下拉菜单、警告横幅均使用 framer-motion 过渡 |
+
+**修复**
+
+- 主题切换真实生效（`html.dark` 类 + CSS 变量，支持跟随系统）。
+- 无 API Key 也能启动 `lish web` / `lish tui`，界面给出红色横幅引导去设置页配置。
+- 设置弹窗在 390px 窄屏下改为**下拉选择分类**，彻底消除横向滚动。
+- 统一 API 错误响应为 `{ ok: false, error }`，与 [`docs/API.md`](./docs/API.md) 100% 一致。
+- 短密钥脱敏不再泄露长度信息。
+
+**破坏性变更**
+
+HTTP 接口统一为 RPC 风格（全部 `POST` + JSON body），端点路径调整如下：
+
+| 旧 | 新 |
+| --- | --- |
+| `GET /api/health` | `POST /api/health` |
+| `GET /api/config` | `POST /api/config/get` |
+| `GET /api/session/:id/events` | `POST /api/session/events`（body 传 `sessionId`） |
+| `GET /api/files` | `POST /api/files` |
+| `GET /api/files/content?path=` | `POST /api/files/content`（body 传 `path`） |
+| `GET /api/plugins` | `POST /api/plugins` |
+| `GET /api/subagents` | `POST /api/subagents` |
+
+**内存红线（P0）**
+
+- 运行时 RSS 必须 **< 0.5GB**。压测实测峰值 **148 MB（28.9%）**，余量 364 MB。
+- Session 内存事件窗口 5000 条、Trace 每会话 2000 条、前端消息窗口 200 条、
+  文件读取上限 1MB——四条防线共同保证内存不会无界增长。
+
+**质量**
+
+- 后端 14 个测试套件 **294 个用例**全部通过；前端 Zustand 状态 **31 个用例**通过。
+- 前后端 `tsc --noEmit` 零错误，ESLint 零 error。
+- 浏览器压测（12 次切主题 + 10 次开关设置 + 15 条消息）：0 异常、0 console 错误，堆内存收敛无泄漏。
+
+**已知限制**
+
+- 切换预设采用「追加 system 消息」策略，历史预设会一起并入 prompt；互斥预设需后续版本支持按标记替换。
+- 设置弹窗在极小屏幕（<360px）下内容区需要纵向滚动（属于正常滚动，非横向）。
+
+### 历史版本
+
+| 版本 | 说明 |
+| --- | --- |
+| `0.1.0-alpha.3` | 多提供商配置中心、RPC 风格 API、`docs/API.md` |
+| `0.1.0-alpha.2` | 修复 npm 包元数据（description/keywords） |
+| `0.1.0-alpha.1` | 首个公开预览版 |
+| `0.0.0-stage` | 内部占位版本 |
+
+---
+
 ## 安装
 
 > **包名说明**：本项目的 npm 包名为 **`@listudioorg/lish`**，安装后命令为 **`lish`**。
@@ -236,7 +315,7 @@ npx tsx src/cli.ts web # 仅后端，托管已构建的前端产物
 ### 验证安装
 
 ```bash
-lish --version                          # 期望输出 0.1.0-alpha.2
+lish --version                          # 期望输出 0.1.0-beta.1
 lish web --port 3000                    # 启动服务
 curl http://localhost:3000/api/health   # 期望返回 {"ok":true,...}
 ```
@@ -245,13 +324,13 @@ curl http://localhost:3000/api/health   # 期望返回 {"ok":true,...}
 
 | 安装方式 | 状态 | 说明 |
 | --- | --- | --- |
-| **npm 已发布包** | ✅ **已发布并实测** | `@listudioorg/lish@0.1.0-alpha.2`，从官方源安装后启动正常 |
+| **npm 已发布包** | ✅ **已发布并实测** | `@listudioorg/lish@0.1.0-beta.1`，从官方源安装后启动正常 |
 | npm 本地源码目录 | ✅ 已实测 | 在 `/tmp` 下启动，页面与 API 均正常 |
 | pnpm 全局安装 | ✅ 已实测 | 同上 |
 | bun 全局安装 | ✅ 已实测 | 同上 |
 | Git 仓库地址 | ⚠️ 未端到端验证 | 流程与本地源码一致，本机因内存限制未跑完 |
 
-> 已发布版本：`0.1.0-alpha.2`（`latest`）。查看全部版本：
+> 当前发布版本：`0.1.0-beta.1`（`latest`）。查看全部版本：
 > `npm view @listudioorg/lish versions`
 
 ---

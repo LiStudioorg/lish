@@ -10,7 +10,13 @@ import { dirname, join } from "node:path";
 
 import { Context } from "./kernel/context.js";
 import { AgentLoop } from "./core/agent-loop.js";
-import { LlmRuntime, MockProvider, type LlmProvider } from "./core/llm.js";
+import {
+  LlmRuntime,
+  MockProvider,
+  type LlmProvider,
+  type ToolCall,
+  type ToolResult,
+} from "./core/llm.js";
 import { OpenAIProvider } from "./core/providers/openai.js";
 import { SessionService } from "./core/sessions.js";
 import { ToolRegistry } from "./core/tools.js";
@@ -96,10 +102,66 @@ export interface ProviderEntry {
   id: string;
   /** 展示名，用户可改，例如「DeepSeek 官方」。 */
   name: string;
+  /** 预设渠道类型（deepseek / openai / anthropic / kimi / ollama / custom）。 */
+  preset?: ProviderPreset;
   baseURL: string;
   apiKey: string;
-  /** 最近一次选择的模型；获取模型列表后会被写入。 */
+  /**
+   * 该渠道下保存的**全部**模型名。
+   *
+   * 一个渠道通常配套多个模型（如 DeepSeek 的 chat / reasoner，
+   * OpenAI 的 gpt-4o / gpt-4o-mini）。用户可自行增删。
+   */
+  models: string[];
+  /** 当前选中的模型；必须存在于 `models` 中。 */
   model: string;
+}
+
+/** 常见渠道预设。选中后自动填充 Base URL，用户只需填 Key。 */
+export type ProviderPreset =
+  | "deepseek"
+  | "openai"
+  | "anthropic"
+  | "kimi"
+  | "ollama"
+  | "custom";
+
+/** 预设渠道的默认地址与推荐模型。 */
+export const PROVIDER_PRESETS: Record<
+  ProviderPreset,
+  { name: string; baseURL: string; models: string[] }
+> = {
+  deepseek: {
+    name: "DeepSeek",
+    baseURL: "https://api.deepseek.com",
+    models: ["deepseek-chat", "deepseek-reasoner"],
+  },
+  openai: {
+    name: "OpenAI",
+    baseURL: "https://api.openai.com/v1",
+    models: ["gpt-4o", "gpt-4o-mini"],
+  },
+  anthropic: {
+    name: "Anthropic",
+    baseURL: "https://api.anthropic.com/v1",
+    models: ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"],
+  },
+  kimi: {
+    name: "Kimi（月之暗面）",
+    baseURL: "https://api.moonshot.cn/v1",
+    models: ["moonshot-v1-8k", "moonshot-v1-32k"],
+  },
+  ollama: {
+    name: "Ollama（本地）",
+    baseURL: "http://127.0.0.1:11434/v1",
+    models: ["llama3.1", "qwen2.5"],
+  },
+  custom: { name: "自定义", baseURL: "", models: [] },
+};
+
+/** 判断某个值是否为合法预设 key。 */
+export function isProviderPreset(v: unknown): v is ProviderPreset {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(PROVIDER_PRESETS, v);
 }
 
 /**
@@ -138,12 +200,38 @@ function normalizeProvider(raw: unknown): ProviderEntry | null {
   const id = str("id");
   if (!id) return null;
   const baseURL = str("baseURL") || str("baseUrl") || DEFAULTS.baseURL;
+
+  // 新结构是 models 数组；旧结构只有单个 model 字符串，这里统一升级
+  const rawModels = Array.isArray(r.models) ? r.models : [];
+  const models: string[] = [];
+  const seenModels = new Set<string>();
+  for (const m of rawModels) {
+    if (typeof m !== "string") continue;
+    const v = m.trim();
+    if (!v || seenModels.has(v)) continue;
+    seenModels.add(v);
+    models.push(v);
+  }
+  // 只有「没有 models 数组」的旧结构才迁移单个 model 字段；
+  // 已有 models 时不得把选中的非法模型名偷偷塞进列表。
+  const legacyModel = str("model");
+  if (models.length === 0 && legacyModel) models.push(legacyModel);
+
+  const presetRaw = r.preset;
+  const preset = isProviderPreset(presetRaw) ? presetRaw : undefined;
+
+  // 当前选中模型必须落在 models 里，否则回落到第一个
+  const wanted = str("model") || models[0] || "";
+  const model = models.includes(wanted) ? wanted : (models[0] ?? "");
+
   return {
     id,
     name: str("name") || baseURL,
+    ...(preset ? { preset } : {}),
     baseURL,
     apiKey: str("apiKey"),
-    model: str("model"),
+    models,
+    model,
   };
 }
 
@@ -190,6 +278,7 @@ export function readFileConfig(
         name: legacy.baseURL ?? DEFAULTS.baseURL,
         baseURL: legacy.baseURL ?? DEFAULTS.baseURL,
         apiKey: legacy.apiKey ?? "",
+        models: legacy.model ? [legacy.model] : [],
         model: legacy.model ?? "",
       };
       return {
@@ -270,11 +359,18 @@ export async function writeFileConfig(
 
   if (active) {
     const idx = list.findIndex((p) => p.id === active.id);
+    const nextModel = patch.model ?? active.model;
     list[idx] = {
       ...active,
       ...(patch.apiKey ? { apiKey: patch.apiKey } : {}),
       ...(patch.baseURL ? { baseURL: patch.baseURL } : {}),
       ...(patch.model ? { model: patch.model } : {}),
+      // 单模型写入时同步 ensure 到 models 数组，保持两者一致
+      models:
+        patch.model && !active.models.includes(patch.model)
+          ? [...active.models, patch.model]
+          : active.models,
+      model: nextModel,
     };
   } else {
     const created: ProviderEntry = {
@@ -282,6 +378,7 @@ export async function writeFileConfig(
       name: patch.baseURL ?? DEFAULTS.baseURL,
       baseURL: patch.baseURL ?? DEFAULTS.baseURL,
       apiKey: patch.apiKey ?? "",
+      models: patch.model ? [patch.model] : [],
       model: patch.model ?? "",
     };
     list.push(created);
@@ -358,8 +455,15 @@ export interface Runtime {
   listProviders(): ProviderEntry[];
   /** 当前激活的提供商 id。 */
   activeProviderId(): string | undefined;
-  /** 新增或就地更新一个提供商（按 id 匹配），必要时切换激活项。 */
-  upsertProvider(entry: Partial<ProviderEntry>): Promise<ProviderEntry[]>;
+  /**
+   * 新增或就地更新一个提供商（按 id 匹配），必要时切换激活项。
+   *
+   * `models` 为完整替换语义：传入即覆盖整个模型列表；
+   * 不传则保留原有列表。`apiKey` 传空串表示不修改。
+   */
+  upsertProvider(
+    entry: Partial<ProviderEntry> & { models?: string[] },
+  ): Promise<ProviderEntry[]>;
   /** 删除一个提供商；删掉激活项时自动回落到第一条。 */
   removeProvider(id: string): Promise<ProviderEntry[]>;
   /** 切换激活的提供商，并立即热切换底层 Provider。 */
@@ -370,6 +474,12 @@ export interface Runtime {
   updateSettings(patch: Partial<AppSettings>): Promise<AppSettings>;
   /** 把当前 Agent 预设注入指定会话的 system prompt。 */
   applyPreset(sessionId: string): void;
+  /**
+   * 把会话日志投影成前端可渲染的消息列表（带稳定 seq 游标）。
+   *
+   * 只投影用户与助手消息，system / trace 等旁路事件不占用前端内存。
+   */
+  sessionMessages(sessionId: string): SessionMessageView[];
   /** 工作区根目录（文件树与终端的工作目录）。 */
   workspaceRoot: string;
   /** 当前已加载的插件列表。 */
@@ -408,6 +518,25 @@ export interface PublicConfig {
   /** 提供商列表（密钥已脱敏），供设置面板管理多个来源。 */
   providers?: PublicProvider[];
   activeProviderId?: string;
+}
+
+/**
+ * 供前端渲染的一条历史消息。
+ *
+ * `seq` 是会话日志中的稳定序号（从 0 递增），用作分页游标——
+ * 不能用时间戳，因为同一毫秒内可能有多条消息。
+ */
+export interface SessionMessageView {
+  seq: number;
+  role: "user" | "assistant";
+  content: string;
+  toolCalls: Array<{
+    id: string;
+    name: string;
+    argsJson?: string;
+    content?: string;
+    isError?: boolean;
+  }>;
 }
 
 /** 对外暴露的提供商视图（apiKey 永久脱敏）。 */
@@ -695,6 +824,10 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
               ...(patch.apiKey ? { apiKey: patch.apiKey.trim() } : {}),
               ...(patch.baseURL?.trim() ? { baseURL: patch.baseURL.trim() } : {}),
               ...(patch.model?.trim() ? { model: patch.model.trim() } : {}),
+              models:
+                patch.model?.trim() && !p.models.includes(patch.model.trim())
+                  ? [...p.models, patch.model.trim()]
+                  : p.models,
             }
           : p,
       );
@@ -704,6 +837,7 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
         name: next.baseURL,
         baseURL: next.baseURL,
         apiKey: next.apiKey,
+        models: [next.model],
         model: next.model,
       };
       providers = [...providers, created];
@@ -773,16 +907,39 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     async upsertProvider(entry) {
       const id = entry.id?.trim();
       const existing = id ? providers.find((p) => p.id === id) : undefined;
+      /** 规整模型数组：去空白、去重，保持用户给定顺序。 */
+      const cleanModels = (input: unknown): string[] => {
+        if (!Array.isArray(input)) return [];
+        const seen = new Set<string>();
+        const out: string[] = [];
+        for (const m of input) {
+          if (typeof m !== "string") continue;
+          const v = m.trim();
+          if (!v || seen.has(v)) continue;
+          seen.add(v);
+          out.push(v);
+        }
+        return out;
+      };
+
       if (existing) {
+        const models =
+          entry.models !== undefined ? cleanModels(entry.models) : existing.models;
+        // 选中的模型必须存在；否则回落到第一个（数组为空时留空）
+        const wanted = entry.model !== undefined ? entry.model.trim() : existing.model;
+        const model = models.includes(wanted) ? wanted : (models[0] ?? "");
+
         const merged: ProviderEntry = {
           ...existing,
           ...(entry.name !== undefined ? { name: entry.name.trim() || existing.name } : {}),
+          ...(entry.preset !== undefined ? { preset: entry.preset } : {}),
           ...(entry.baseURL !== undefined
             ? { baseURL: entry.baseURL.trim() || existing.baseURL }
             : {}),
           // 空字符串视为「不修改密钥」，避免前端把脱敏值回写
           ...(entry.apiKey ? { apiKey: entry.apiKey.trim() } : {}),
-          ...(entry.model !== undefined ? { model: entry.model.trim() } : {}),
+          models,
+          model,
         };
         providers = providers.map((p) => (p.id === existing.id ? merged : p));
         if (currentProviderId === merged.id) {
@@ -790,12 +947,17 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
           applyProvider(merged);
         }
       } else {
+        const models = cleanModels(entry.models);
+        const wanted = entry.model?.trim() ?? "";
+        const model = models.includes(wanted) ? wanted : (models[0] ?? "");
         const created: ProviderEntry = {
           id: makeProviderId(),
           name: entry.name?.trim() || entry.baseURL?.trim() || "新提供商",
+          ...(entry.preset ? { preset: entry.preset } : {}),
           baseURL: entry.baseURL?.trim() || DEFAULTS.baseURL,
           apiKey: entry.apiKey?.trim() ?? "",
-          model: entry.model?.trim() || DEFAULTS.model,
+          models,
+          model,
         };
         providers = [...providers, created];
         // 第一条自动激活，省掉用户再点一次
@@ -867,6 +1029,65 @@ export async function createRuntime(config: RuntimeConfig): Promise<Runtime> {
     /** 在会话开跑前把当前预设注入 system prompt（由 server / TUI 调用）。 */
     applyPreset(sessionId: string) {
       applyPresetToSession(sessionId);
+    },
+    sessionMessages(sessionId: string) {
+      const session = sessions.get(sessionId);
+      if (!session) return [];
+
+      const out: SessionMessageView[] = [];
+      // session.log 是 readonly 的宽类型数组，这里逐条收窄，避免 any
+      const log = session.log as ReadonlyArray<Record<string, unknown>>;
+
+      for (let i = 0; i < log.length; i++) {
+        const event = log[i]!;
+        if (event.type === "message.user") {
+          out.push({
+            seq: i,
+            role: "user",
+            content: String(event.content ?? ""),
+            toolCalls: [],
+          });
+          continue;
+        }
+        if (event.type === "message.assistant") {
+          const calls = Array.isArray(event.toolCalls)
+            ? (event.toolCalls as ToolCall[])
+            : [];
+          out.push({
+            seq: i,
+            role: "assistant",
+            content: String(event.content ?? ""),
+            toolCalls: calls.map((c) => ({
+              id: c.id,
+              name: c.name,
+              argsJson:
+                c.arguments === undefined ? undefined : JSON.stringify(c.arguments),
+            })),
+          });
+        }
+      }
+
+      // 把紧随其后的 tool.result 事件挂到最近一条助手消息上，
+      // 这样前端只需渲染一条消息即可看到完整的工具调用过程。
+      for (let i = 0; i < log.length; i++) {
+        const event = log[i]!;
+        if (event.type !== "tool.result") continue;
+        // 事件总线里 tool 是 unknown，这里显式收窄，避免 any
+        const tool = event.tool as ToolResult | undefined;
+        if (!tool) continue;
+        for (let j = out.length - 1; j >= 0; j--) {
+          const target = out[j]!;
+          if (target.role !== "assistant" || target.seq > i) continue;
+          const call = target.toolCalls.find((c) => c.id === tool.toolCallId);
+          if (call) {
+            call.content = tool.content;
+            call.isError = tool.isError;
+          }
+          break;
+        }
+      }
+
+      return out;
     },
     async updateSettings(patch: Partial<AppSettings>) {
       appSettings = mergeSettings(appSettings, patch);

@@ -100,6 +100,68 @@ async function postJson<T>(
   }
 }
 
+/** 后端返回的一条历史消息（与 store 的 ChatMessage 形状对齐）。 */
+export interface HistoryMessage {
+  seq: number;
+  role: "user" | "assistant";
+  content: string;
+  toolCalls: Array<{
+    id: string;
+    name: string;
+    argsJson?: string;
+    content?: string;
+    isError?: boolean;
+  }>;
+}
+
+export interface HistoryPage {
+  ok: boolean;
+  messages: HistoryMessage[];
+  hasMore: boolean;
+  nextBefore?: number;
+  total: number;
+  error?: string;
+}
+
+/**
+ * 分页拉取会话历史。
+ *
+ * 默认只取最近 20 条；传 `before` 取更早的一页。
+ * 这样长对话不会一次性把上千条消息灌进 DOM。
+ */
+export async function fetchHistory(
+  sessionId: string,
+  options: { limit?: number; before?: number } = {},
+): Promise<HistoryPage> {
+  const r = await postJson<{
+    messages?: HistoryMessage[];
+    hasMore?: boolean;
+    nextBefore?: number;
+    total?: number;
+    error?: string;
+  }>("/api/session/messages", {
+    sessionId,
+    ...(options.limit !== undefined ? { limit: options.limit } : {}),
+    ...(options.before !== undefined ? { before: options.before } : {}),
+  });
+  if (!r.ok || !r.data) {
+    return {
+      ok: false,
+      messages: [],
+      hasMore: false,
+      total: 0,
+      error: r.data?.error ?? `HTTP ${r.status}`,
+    };
+  }
+  return {
+    ok: true,
+    messages: r.data.messages ?? [],
+    hasMore: r.data.hasMore ?? false,
+    nextBefore: r.data.nextBefore,
+    total: r.data.total ?? 0,
+  };
+}
+
 export interface ChatCallbacks {
   onText: (delta: string) => void;
   onEvent: (event: ToolStreamEvent) => void;
@@ -186,14 +248,50 @@ export function streamChat(
 
 // --- 配置接口 -------------------------------------------------------------
 
+/** 渠道预设类型。 */
+export type ProviderPreset =
+  | "deepseek"
+  | "openai"
+  | "anthropic"
+  | "kimi"
+  | "ollama"
+  | "custom";
+
+/** 预设渠道的展示信息（与后端 PROVIDER_PRESETS 保持一致）。 */
+export const PROVIDER_PRESETS: Array<{
+  id: ProviderPreset;
+  label: string;
+  baseURL: string;
+  models: string[];
+}> = [
+  { id: "deepseek", label: "DeepSeek", baseURL: "https://api.deepseek.com", models: ["deepseek-chat", "deepseek-reasoner"] },
+  { id: "openai", label: "OpenAI", baseURL: "https://api.openai.com/v1", models: ["gpt-4o", "gpt-4o-mini"] },
+  { id: "anthropic", label: "Anthropic", baseURL: "https://api.anthropic.com/v1", models: ["claude-sonnet-4-20250514", "claude-3-5-haiku-20241022"] },
+  { id: "kimi", label: "Kimi（月之暗面）", baseURL: "https://api.moonshot.cn/v1", models: ["moonshot-v1-8k", "moonshot-v1-32k"] },
+  { id: "ollama", label: "Ollama（本地）", baseURL: "http://127.0.0.1:11434/v1", models: ["llama3.1", "qwen2.5"] },
+  { id: "custom", label: "自定义", baseURL: "", models: [] },
+];
+
 /** 提供商（密钥已脱敏）。 */
 export interface ProviderInfo {
   id: string;
   name: string;
+  preset?: ProviderPreset;
   baseURL: string;
+  /** 该渠道下保存的全部模型。 */
+  models: string[];
+  /** 当前选中的模型。 */
   model: string;
   apiKeyMasked: string;
   hasApiKey: boolean;
+}
+
+/** 全部渠道的模型汇总（供聊天界面切换）。 */
+export interface ModelOption {
+  providerId: string;
+  providerName: string;
+  model: string;
+  active?: boolean;
 }
 
 export interface ServerConfig {
@@ -207,6 +305,7 @@ export interface ServerConfig {
   tools: string[];
   providers?: ProviderInfo[];
   activeProviderId?: string;
+  allModels?: ModelOption[];
 }
 
 /** 提供商增删改的返回体（三个写接口结构一致）。 */
@@ -214,71 +313,59 @@ export interface ProvidersResult {
   ok: boolean;
   providers: ProviderInfo[];
   activeProviderId?: string;
+  allModels?: ModelOption[];
   error?: string;
 }
 
 async function providerRequest(
   path: string,
-  init?: RequestInit,
+  body?: Record<string, unknown>,
 ): Promise<ProvidersResult> {
-  try {
-    const res = await fetch(`${API_BASE}${path}`, init);
-    const data = (await res.json().catch(() => ({}))) as Partial<ProvidersResult> & {
-      error?: string;
-    };
-    if (!res.ok) {
-      return {
-        ok: false,
-        providers: data.providers ?? [],
-        activeProviderId: data.activeProviderId,
-        error: data.error ?? `HTTP ${res.status}`,
-      };
-    }
-    return {
-      ok: true,
-      providers: data.providers ?? [],
-      activeProviderId: data.activeProviderId,
-    };
-  } catch (err) {
+  const r = await postJson<{
+    providers?: ProviderInfo[];
+    activeProviderId?: string;
+    allModels?: ModelOption[];
+    error?: string;
+  }>(path, body);
+  if (!r.ok) {
     return {
       ok: false,
-      providers: [],
-      error: err instanceof Error ? err.message : String(err),
+      providers: r.data?.providers ?? [],
+      activeProviderId: r.data?.activeProviderId,
+      allModels: r.data?.allModels,
+      error: r.data?.error ?? `HTTP ${r.status}`,
     };
   }
+  return {
+    ok: true,
+    providers: r.data?.providers ?? [],
+    activeProviderId: r.data?.activeProviderId,
+    allModels: r.data?.allModels,
+  };
 }
 
 /** 新增或更新提供商；带 id 即更新，apiKey 为空表示不改密钥。 */
 export function saveProvider(input: {
   id?: string;
   name?: string;
+  preset?: ProviderPreset;
   baseURL?: string;
   apiKey?: string;
   model?: string;
+  /** 完整替换该渠道的模型列表。 */
+  models?: string[];
 }): Promise<ProvidersResult> {
-  return providerRequest("/api/providers", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(input),
-  });
+  return providerRequest("/api/providers", { ...input });
 }
 
 /** 删除提供商（写操作统一 POST）。 */
 export function deleteProvider(id: string): Promise<ProvidersResult> {
-  return providerRequest("/api/providers/delete", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
+  return providerRequest("/api/providers/delete", { id });
 }
 
 /** 切换激活的提供商（热生效）。 */
 export function activateProvider(id: string): Promise<ProvidersResult> {
-  return providerRequest("/api/providers/activate", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ id }),
-  });
+  return providerRequest("/api/providers/activate", { id });
 }
 
 export async function fetchConfig(): Promise<ServerConfig | null> {

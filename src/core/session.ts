@@ -86,6 +86,15 @@ export type MessageEvent =
 
 // --- 配置选项 -------------------------------------------------------------
 
+/**
+ * 内存中默认保留的事件条数上限。
+ *
+ * 取 5000 的理由：一轮完整对话通常产生 3–8 条事件，
+ * 5000 条 ≈ 600–1600 轮，单进程内几乎不可能达到；
+ * 同时 5000 条事件约占几 MB 内存，对 0.5GB 红线而言可忽略。
+ */
+export const DEFAULT_MAX_EVENTS = 5000;
+
 export interface SessionOptions {
   /** 显式指定 id；否则自动生成。 */
   id?: string;
@@ -101,6 +110,20 @@ export interface SessionOptions {
    * 直接抛错，而不是跳过该行。默认 false，以便进程崩溃后仍能尽量恢复。
    */
   strict?: boolean;
+  /**
+   * 内存中最多保留多少个事件（滑动窗口）。
+   *
+   * 为什么需要：会话是 append-only 的，长时间运行的单个会话（例如挂了几个月
+   * 的守护进程）会把每轮对话、每次工具输出、每条轨迹事件都留在内存里，
+   * 累积到几十万条后 RSS 会突破 P0 红线（0.5GB）。
+   *
+   * 注意窗口只裁剪**内存**，磁盘上的 JSONL 仍是完整历史——
+   * `deriveMessages` 与分页接口读取的是被裁剪后的窗口，
+   * 需要更早的历史时应从磁盘重新加载（`Session.load`）。
+   *
+   * 默认 5000 条，约等于 1000+ 轮对话，远超实际交互长度。
+   */
+  maxEvents?: number;
 }
 
 /** `deriveMessages` 投影的选项。 */
@@ -119,6 +142,8 @@ export class Session {
   readonly title?: string;
   /** 加载时坏行是否视为致命错误。 */
   readonly strict: boolean;
+  /** 内存事件窗口上限（见 SessionOptions.maxEvents）。 */
+  private readonly maxEvents: number;
 
   private readonly events: AnySessionEvent[] = [];
   private readonly file?: string;
@@ -133,6 +158,7 @@ export class Session {
     this.file = options.file;
     this.now = options.now ?? (() => Date.now());
     this.strict = options.strict ?? false;
+    this.maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS;
 
     if (options.emitCreated !== false) {
       this.append({ type: "session.created", sessionId: this.id, ...(this.title !== undefined ? { title: this.title } : {}) });
@@ -156,6 +182,11 @@ export class Session {
     } as T & { seq: number; ts: number };
 
     this.events.push(stored as unknown as AnySessionEvent);
+
+    // 滑动窗口：超出上限时一次性裁掉最旧的一批（批量裁剪比逐条 shift 快得多）
+    if (this.events.length > this.maxEvents) {
+      this.events.splice(0, this.events.length - this.maxEvents);
+    }
 
     if (this.file) {
       const line = JSON.stringify(stored) + "\n";

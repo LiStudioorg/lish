@@ -51,6 +51,7 @@ import type {
   PublicConfig,
   PublicProvider,
 } from "./runtime.js";
+import { isProviderPreset } from "./runtime.js";
 import { maskApiKey } from "./runtime.js";
 import { readFileTree } from "./tools/file-tree.js";
 import { runShell } from "./tools/shell.js";
@@ -289,12 +290,20 @@ export function createApp(runtime: Runtime): express.Express {
   }
 
   app.post("/api/health", (_req, res) => {
+    // 暴露内存指标：这是 P0 红线（RSS < 1GB）的可观测入口，
+    // 压测脚本与运维探针都依赖它，不应只在调试时才有。
+    const mem = process.memoryUsage();
     res.json({
       ok: true,
       model: runtime.config.model,
       workspace: runtime.config.workspaceRoot,
       sessions: runtime.sessions.size,
       tools: runtime.tools.list(),
+      rss: mem.rss,
+      heapUsed: mem.heapUsed,
+      heapTotal: mem.heapTotal,
+      external: mem.external,
+      arrayBuffers: mem.arrayBuffers,
     });
   });
 
@@ -326,6 +335,71 @@ export function createApp(runtime: Runtime): express.Express {
    * 返回完整事件数组，每条包含 traceId、毫秒时间戳、真实耗时与 tokenUsage，
    * 供前端轨迹面板渲染时间轴、条形图与详情。
    */
+  /**
+   * 分页读取会话历史消息。
+   *
+   * 为什么必须分页：一次把整段对话（可能上千条）返回并渲染，
+   * 前端 DOM 节点数与后端序列化体积都会线性膨胀，
+   * 长对话下内存轻松破百 MB。这里默认只给最近 `limit` 条，
+   * 并提供 `hasMore` 与 `nextBefore` 供前端"加载更早"。
+   *
+   * 请求体：
+   *   - sessionId: string        必填
+   *   - limit:     number        可选，默认 20，上限 200
+   *   - before:    number        可选，只返回 seq < before 的消息
+   *
+   * 响应：
+   *   - messages:   按时间正序（最早在前），便于前端直接 unshift
+   *   - hasMore:    是否还有更早的历史
+   *   - nextBefore: 下一次请求应传的 before 值（最早一条的 seq）
+   *   - total:      当前会话消息总数
+   */
+  app.post("/api/session/messages", (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const sessionId = typeof body.sessionId === "string" ? body.sessionId.trim() : "";
+    if (!sessionId) {
+      res.status(400).json({ ok: false, error: "缺少 sessionId" });
+      return;
+    }
+
+    const rawLimit = Number(body.limit);
+    const limit = Number.isFinite(rawLimit)
+      ? Math.min(200, Math.max(1, Math.floor(rawLimit)))
+      : 20;
+    const rawBefore = Number(body.before);
+    const before = Number.isFinite(rawBefore) && rawBefore > 0 ? rawBefore : undefined;
+
+    const session = runtime.sessions.get(sessionId);
+    if (!session) {
+      res.status(404).json({ ok: false, error: `会话不存在：${sessionId}` });
+      return;
+    }
+
+    try {
+      const all = runtime.sessionMessages(sessionId);
+      // before 语义：只要 seq 严格小于游标的那些（更早的）
+      const filtered =
+        before === undefined ? all : all.filter((m) => m.seq < before);
+      const start = Math.max(0, filtered.length - limit);
+      const slice = filtered.slice(start);
+      const hasMore = start > 0;
+
+      res.json({
+        ok: true,
+        sessionId,
+        messages: slice,
+        hasMore,
+        nextBefore: slice.length > 0 ? slice[0]!.seq : undefined,
+        total: all.length,
+      });
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  });
+
   app.post("/api/session/events", (req, res) => {
     const sessionId =
       typeof req.body?.sessionId === "string" ? req.body.sessionId.trim() : "";
@@ -471,11 +545,24 @@ export function createApp(runtime: Runtime): express.Express {
     runtime.listProviders().map((p) => ({
       id: p.id,
       name: p.name,
+      ...(p.preset ? { preset: p.preset } : {}),
       baseURL: p.baseURL,
+      models: p.models,
       model: p.model,
       apiKeyMasked: maskApiKey(p.apiKey),
       hasApiKey: p.apiKey.length > 0,
     }));
+
+  /** 汇总所有渠道的模型，供聊天界面一次性列出。 */
+  const allModels = () =>
+    runtime.listProviders().flatMap((p) =>
+      p.models.map((m) => ({
+        providerId: p.id,
+        providerName: p.name,
+        model: m,
+        active: p.id === runtime.activeProviderId() && m === p.model,
+      })),
+    );
 
   /**
    * 列出全部模型提供商（密钥已脱敏）。
@@ -488,6 +575,7 @@ export function createApp(runtime: Runtime): express.Express {
       ok: true,
       providers: publicProviders(),
       activeProviderId: runtime.activeProviderId(),
+      allModels: allModels(),
     });
   });
 
@@ -508,13 +596,28 @@ export function createApp(runtime: Runtime): express.Express {
       return;
     }
 
+    const presetRaw = str("preset");
+    const presetInvalid = presetRaw !== undefined && !isProviderPreset(presetRaw);
+    if (presetInvalid) {
+      res.status(400).json({ ok: false, error: `未知的渠道预设：${presetRaw}` });
+      return;
+    }
+
+    // models 为完整替换语义：前端每次提交该渠道的完整模型列表
+    const modelsRaw = body.models;
+    const models = Array.isArray(modelsRaw)
+      ? modelsRaw.filter((m): m is string => typeof m === "string")
+      : undefined;
+
     try {
       await runtime.upsertProvider({
         id: str("id"),
         name: str("name"),
+        preset: isProviderPreset(presetRaw) ? presetRaw : undefined,
         baseURL,
         model: str("model"),
         apiKey: str("apiKey"),
+        ...(models !== undefined ? { models } : {}),
       });
     } catch (err) {
       res.status(400).json({
@@ -527,6 +630,7 @@ export function createApp(runtime: Runtime): express.Express {
       ok: true,
       providers: publicProviders(),
       activeProviderId: runtime.activeProviderId(),
+      allModels: allModels(),
       config: {
         baseURL: runtime.config.baseURL,
         model: runtime.config.model,
@@ -554,6 +658,7 @@ export function createApp(runtime: Runtime): express.Express {
       ok: true,
       providers: publicProviders(),
       activeProviderId: runtime.activeProviderId(),
+      allModels: allModels(),
       config: {
         baseURL: runtime.config.baseURL,
         model: runtime.config.model,
@@ -583,6 +688,7 @@ export function createApp(runtime: Runtime): express.Express {
       ok: true,
       providers: publicProviders(),
       activeProviderId: runtime.activeProviderId(),
+      allModels: allModels(),
       config: {
         baseURL: runtime.config.baseURL,
         model: runtime.config.model,
@@ -610,6 +716,7 @@ export function createApp(runtime: Runtime): express.Express {
       ...view,
       providers: publicProviders(),
       activeProviderId: runtime.activeProviderId(),
+      allModels: allModels(),
       settings: runtime.getSettings(),
     });
   });

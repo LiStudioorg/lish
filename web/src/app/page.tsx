@@ -37,9 +37,13 @@ import {
   fetchConfig,
   fetchPlugins,
   fetchSubAgents,
+  fetchHistory,
   fetchTraceEvents,
   reloadPlugins,
   updateAppSettings,
+  activateProvider,
+  saveProvider,
+  type HistoryMessage,
   type PluginInfo,
   type AppSettings as ServerAppSettings,
 } from "../lib/api";
@@ -52,12 +56,37 @@ import { PRESET_META, type AppSettings } from "../lib/settings";
 import {
   useAppStore,
   useMessages,
+  type ChatMessage,
   type SideView,
 } from "../lib/store";
 import { MessageView, Select } from "../ui/ChatParts";
 import { RightPanel } from "../ui/RightPanel";
 import { SettingsModal } from "../ui/SettingsModal";
 import { TracePanel } from "../ui/TracePanel";
+
+// --- 历史消息转换 ---------------------------------------------------------
+
+/**
+ * 把后端历史消息转成前端 ChatMessage。
+ *
+ * 后端只给出 seq，前端需要稳定的 React key，这里用 `seq` 拼出确定性 id，
+ * 这样重复加载同一页时不会产生重复的 key。
+ */
+function toChatMessage(m: HistoryMessage): ChatMessage {
+  return {
+    id: `h-${m.seq}`,
+    role: m.role,
+    content: m.content,
+    toolCalls: m.toolCalls.map((c) => ({
+      id: c.id,
+      name: c.name,
+      argsJson: c.argsJson,
+      content: c.content,
+      isError: c.isError,
+      status: c.content === undefined ? "done" : c.isError ? "error" : "done",
+    })),
+  };
+}
 
 // --- 侧边栏 ---------------------------------------------------------------
 
@@ -334,10 +363,63 @@ function StatusBar() {
 
 // --- 消息区 ---------------------------------------------------------------
 
-/** 消息列表 + 空态欢迎语。 */
+/** 消息列表 + 空态欢迎语 + 历史分页。 */
 function MessageList() {
   const messages = useMessages();
+  const activeId = useAppStore((s) => s.activeId);
+  const hasMore = useAppStore(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.hasMore ?? false,
+  );
+  const loadingMore = useAppStore(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.loadingMore ?? false,
+  );
+  const nextBefore = useAppStore(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.nextBefore,
+  );
+  const total = useAppStore(
+    (s) => s.sessions.find((x) => x.id === s.activeId)?.total ?? 0,
+  );
+
   const scrollRef = useRef<HTMLDivElement>(null);
+  const topRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * 加载更早的历史。
+   *
+   * 关键：必须在插入新消息**之前**记录 scrollHeight，
+   * 插入后按差值补偿 scrollTop，否则页面会「唰」地跳回顶部。
+   */
+  const loadEarlier = useCallback(async () => {
+    const state = useAppStore.getState();
+    const sid = state.activeId;
+    if (!sid || state.sessions.find((s) => s.id === sid)?.loadingMore) return;
+    const before = state.sessions.find((s) => s.id === sid)?.nextBefore;
+    if (before === undefined) return;
+
+    const el = scrollRef.current;
+    const prevHeight = el?.scrollHeight ?? 0;
+
+    state.setLoadingMore(sid, true);
+    const page = await fetchHistory(sid, { limit: 20, before });
+    if (!page.ok) {
+      state.setLoadingMore(sid, false);
+      return;
+    }
+
+    state.prependMessages(sid, {
+      messages: page.messages.map(toChatMessage),
+      hasMore: page.hasMore,
+      nextBefore: page.nextBefore,
+      total: page.total,
+    });
+
+    // 等 React 完成这次插入再补偿滚动位置
+    requestAnimationFrame(() => {
+      const node = scrollRef.current;
+      if (!node) return;
+      node.scrollTop += node.scrollHeight - prevHeight;
+    });
+  }, []);
 
   // 自动滚底：仅当用户本来贴近底部，或正在流式输出
   useEffect(() => {
@@ -349,9 +431,37 @@ function MessageList() {
     }
   }, [messages]);
 
+  // 顶部哨兵：滚到顶自动加载更早（比必须点按钮更顺手）
+  useEffect(() => {
+    const sentinel = topRef.current;
+    if (!sentinel || !hasMore || !activeId) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) void loadEarlier();
+      },
+      { root: scrollRef.current, rootMargin: "80px 0px 0px 0px" },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [hasMore, activeId, loadEarlier, nextBefore]);
+
   return (
     <div ref={scrollRef} className="absolute inset-0 overflow-y-auto">
       <div className="mx-auto flex min-h-full w-full max-w-[860px] flex-col gap-5 px-4 py-6">
+        {messages.length > 0 && (hasMore || loadingMore) ? (
+          <div ref={topRef} className="flex justify-center">
+            <button
+              type="button"
+              onClick={() => void loadEarlier()}
+              disabled={loadingMore}
+              className="rounded-full border border-line-strong px-3 py-1 text-[11.5px] text-ink-3 transition-colors hover:border-brand hover:text-brand disabled:opacity-50"
+            >
+              {loadingMore
+                ? "加载中…"
+                : `加载更早${total > messages.length ? `（共 ${total} 条）` : ""}`}
+            </button>
+          </div>
+        ) : null}
         {messages.length === 0 ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-brand text-[17px] font-bold text-white">
@@ -435,12 +545,47 @@ function Composer() {
     abortRef.current = null;
   }, []);
 
+  /**
+   * 切换模型。
+   *
+   * 若目标模型在另一个渠道下，先激活那个渠道再设置模型；
+   * 同渠道内则直接改当前模型。两步都有失败兜底，绝不静默吞错。
+   */
+  const switchModel = useCallback(async (model: string) => {
+    const cfg = useAppStore.getState().serverCfg;
+    if (!cfg) return;
+    const target = cfg.allModels?.find((m) => m.model === model);
+    if (!target) return;
+
+    if (target.providerId !== cfg.activeProviderId) {
+      const act = await activateProvider(target.providerId);
+      if (!act.ok) return;
+    }
+    const saved = await saveProvider({ id: target.providerId, model });
+    const fresh = await fetchConfig();
+    if (fresh) setServerCfg(fresh);
+    if (!saved.ok) return;
+  }, [setServerCfg]);
+
+  /**
+   * 模型选择器数据：列出**所有渠道**保存的模型，而不是写死几个。
+   *
+   * 选中某个模型时，若它属于非激活渠道，会先把那个渠道切为激活，
+   * 再设置模型——否则模型与渠道会对不上，调用必然失败。
+   */
   const modelName = serverCfg?.model ?? "deepseek-chat";
-  const modelOptions = [
-    { value: modelName, label: modelName },
-    { value: "deepseek-reasoner", label: "deepseek-reasoner" },
-    { value: "deepseek-chat", label: "deepseek-chat" },
-  ].filter((o, i, arr) => arr.findIndex((x) => x.value === o.value) === i);
+  const modelOptions = (() => {
+    const all = serverCfg?.allModels ?? [];
+    if (all.length === 0) return [{ value: modelName, label: modelName }];
+    return all.map((m) => ({
+      value: m.model,
+      // 同名模型跨渠道时附上渠道名，避免歧义
+      label:
+        all.filter((x) => x.model === m.model).length > 1
+          ? `${m.model} · ${m.providerName}`
+          : m.model,
+    }));
+  })();
 
   const noKey = serverCfg !== null && !serverCfg.hasApiKey;
 
@@ -511,11 +656,7 @@ function Composer() {
             <div className="ml-auto flex min-w-0 items-center gap-1.5 sm:gap-2">
               <Select
                 value={modelName}
-                onChange={(v) =>
-                  setServerCfg(
-                    serverCfg ? { ...serverCfg, model: v } : serverCfg,
-                  )
-                }
+                onChange={(v) => void switchModel(v)}
                 title="模型"
                 options={modelOptions}
               />
@@ -637,7 +778,12 @@ export default function Page() {
     return () => media.removeEventListener("change", apply);
   }, [settings.theme]);
 
-  // 切换会话时同步该会话的轨迹（订阅而非层层传参）
+  /**
+   * 切换会话时同步轨迹，并按需分页拉取历史消息。
+   *
+   * 只在「本地还没有消息」时拉取，避免用户在本会话里已经聊了几句后
+   * 又被服务端历史覆盖。
+   */
   useEffect(() => {
     return useAppStore.subscribe((state, prev) => {
       if (state.activeId === prev.activeId) return;
@@ -646,8 +792,24 @@ export default function Page() {
         state.setTraceEvents([]);
         return;
       }
+
       void fetchTraceEvents(sid).then((r) => {
         if (r.ok) useAppStore.getState().setTraceEvents(r.events);
+      });
+
+      const local = useAppStore
+        .getState()
+        .sessions.find((s) => s.id === state.activeId);
+      if (!local || local.messages.length > 0) return;
+
+      void fetchHistory(sid, { limit: 20 }).then((page) => {
+        if (!page.ok) return;
+        useAppStore.getState().replaceMessages(state.activeId!, {
+          messages: page.messages.map(toChatMessage),
+          hasMore: page.hasMore,
+          nextBefore: page.nextBefore,
+          total: page.total,
+        });
       });
     });
   }, []);

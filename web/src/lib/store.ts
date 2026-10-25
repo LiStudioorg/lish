@@ -44,6 +44,14 @@ export interface Session {
   id: string;
   title: string;
   messages: ChatMessage[];
+  /** 是否还有更早的历史可分页加载 */
+  hasMore: boolean;
+  /** 下一次「加载更早」应传的游标（最早一条的 seq） */
+  nextBefore?: number;
+  /** 服务端消息总数（用于展示进度） */
+  total: number;
+  /** 是否正在加载更早的历史 */
+  loadingMore: boolean;
 }
 
 /** 侧边栏视图。 */
@@ -86,15 +94,62 @@ export interface AppState {
 
   setTraceEvents: (e: TraceEvent[]) => void;
   setSubAgents: (a: SubAgentRecord[]) => void;
+
+  // --- actions：历史分页 ---
+  /** 用服务端历史覆盖当前会话消息（首屏 / 切换会话时）。 */
+  replaceMessages: (sessionId: string, page: HistoryPageState) => void;
+  /** 把更早的一页插到消息列表**头部**，并按窗口上限裁剪。 */
+  prependMessages: (sessionId: string, page: HistoryPageState) => void;
+  setLoadingMore: (sessionId: string, loading: boolean) => void;
+}
+
+/** 一页历史的元信息（与 api.HistoryPage 对齐，避免 store 依赖网络层类型）。 */
+export interface HistoryPageState {
+  messages: ChatMessage[];
+  hasMore: boolean;
+  nextBefore?: number;
+  total: number;
 }
 
 // --- 工具函数 -------------------------------------------------------------
+
+/**
+ * 前端最多保留的消息条数。
+ *
+ * 超过这个窗口时从**最旧的一端**裁剪，避免长对话把 DOM 与内存拖垮。
+ * 200 条约等于 100 轮对话，远超实际阅读需要。
+ */
+export const MAX_WINDOW_MESSAGES = 200;
 
 let seq = 0;
 /** 生成客户端局部 id（仅用于 React key，不参与后端协议）。 */
 function localId(prefix: string): string {
   seq += 1;
   return `${prefix}_${Date.now().toString(36)}${seq}`;
+}
+
+/** 构造一个空会话（统一补齐分页字段，避免各处漏写）。 */
+function emptySession(id: string): Session {
+  return {
+    id,
+    title: "新会话",
+    messages: [],
+    hasMore: false,
+    nextBefore: undefined,
+    total: 0,
+    loadingMore: false,
+  };
+}
+
+/**
+ * 把消息列表裁剪到窗口上限。
+ *
+ * 只裁最旧的一端：用户正在看的是底部最新内容，
+ * 顶部历史可以随时通过「加载更早」重新取回。
+ */
+function windowMessages(messages: ChatMessage[]): ChatMessage[] {
+  if (messages.length <= MAX_WINDOW_MESSAGES) return messages;
+  return messages.slice(messages.length - MAX_WINDOW_MESSAGES);
 }
 
 /** 从首条用户消息推导会话标题。 */
@@ -138,7 +193,7 @@ export const useAppStore = create<AppState>((set) => ({
   newSession: () => {
     const id = localId("s");
     set((state) => ({
-      sessions: [{ id, title: "新会话", messages: [] }, ...state.sessions],
+      sessions: [emptySession(id), ...state.sessions],
       activeId: id,
       mainTab: "chat",
       traceEvents: [],
@@ -174,7 +229,10 @@ export const useAppStore = create<AppState>((set) => ({
       if (!state.activeId) {
         const id = localId("s");
         return {
-          sessions: [{ id, title: titleFrom(content), messages: [message] }, ...state.sessions],
+          sessions: [
+            { ...emptySession(id), title: titleFrom(content), messages: [message] },
+            ...state.sessions,
+          ],
           activeId: id,
         };
       }
@@ -263,6 +321,47 @@ export const useAppStore = create<AppState>((set) => ({
 
   setTraceEvents: (e) => set({ traceEvents: e }),
   setSubAgents: (a) => set({ subAgents: a }),
+
+  replaceMessages: (sessionId, page) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId
+          ? {
+              ...s,
+              messages: windowMessages(page.messages),
+              hasMore: page.hasMore,
+              nextBefore: page.nextBefore,
+              total: page.total,
+              loadingMore: false,
+            }
+          : s,
+      ),
+    })),
+
+  prependMessages: (sessionId, page) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) => {
+        if (s.id !== sessionId) return s;
+        // 按 id 去重：并发点击「加载更早」时不会出现重复消息
+        const seen = new Set(s.messages.map((m) => m.id));
+        const fresh = page.messages.filter((m) => !seen.has(m.id));
+        return {
+          ...s,
+          messages: windowMessages([...fresh, ...s.messages]),
+          hasMore: page.hasMore,
+          nextBefore: page.nextBefore,
+          total: page.total,
+          loadingMore: false,
+        };
+      }),
+    })),
+
+  setLoadingMore: (sessionId, loading) =>
+    set((state) => ({
+      sessions: state.sessions.map((s) =>
+        s.id === sessionId ? { ...s, loadingMore: loading } : s,
+      ),
+    })),
 }));
 
 // --- 选择器 ---------------------------------------------------------------

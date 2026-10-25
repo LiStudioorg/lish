@@ -1,6 +1,6 @@
 {
   "name": "@listudioorg/lish",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-beta.1",
   "description": "面向智能体应用的微内核基础设施：事件溯源、插件热插拔、全链路可观测、路径沙箱",
   "main": "index.js",
   "type": "module",
@@ -34,7 +34,8 @@
     "build:web:ci": "node scripts/ensure-web-deps.mjs && cd web && npm run build",
     "test:store": "cd web && tsx tests/store.test.ts",
     "test:shell": "tsx src/tools/test-shell-detect.ts",
-    "test:presets": "tsx src/core/test-presets.ts"
+    "test:presets": "tsx src/core/test-presets.ts",
+    "test:memory": "tsx src/core/test-memory.ts"
   },
   "repository": {
     "type": "git",

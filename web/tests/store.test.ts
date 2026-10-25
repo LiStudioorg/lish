@@ -330,3 +330,125 @@ async function main(): Promise<void> {
 }
 
 void main();
+
+// --- 历史分页与内存窗口 ----------------------------------------------------
+
+test("replaceMessages 用服务端历史覆盖本地消息", () => {
+  beforeEach();
+  const id = snap().newSession();
+  snap().replaceMessages(id, {
+    messages: [
+      { id: "h-0", role: "user", content: "旧消息", toolCalls: [] },
+      { id: "h-1", role: "assistant", content: "旧回复", toolCalls: [] },
+    ],
+    hasMore: true,
+    nextBefore: 0,
+    total: 50,
+  });
+  const s = snap().sessions.find((x) => x.id === id)!;
+  assert.equal(s.messages.length, 2);
+  assert.equal(s.hasMore, true);
+  assert.equal(s.total, 50);
+});
+
+test("prependMessages 把更早的消息插到头部", () => {
+  beforeEach();
+  const id = snap().newSession();
+  snap().replaceMessages(id, {
+    messages: [{ id: "h-10", role: "user", content: "较新", toolCalls: [] }],
+    hasMore: true,
+    nextBefore: 10,
+    total: 30,
+  });
+  snap().prependMessages(id, {
+    messages: [
+      { id: "h-5", role: "user", content: "更早A", toolCalls: [] },
+      { id: "h-6", role: "assistant", content: "更早B", toolCalls: [] },
+    ],
+    hasMore: true,
+    nextBefore: 5,
+    total: 30,
+  });
+  const msgs = snap().sessions.find((x) => x.id === id)!.messages;
+  assert.equal(msgs.length, 3);
+  assert.equal(msgs[0].id, "h-5", "更早的消息必须在最前面");
+  assert.equal(msgs[2].id, "h-10", "原有消息必须留在后面");
+});
+
+test("prependMessages 按 id 去重，重复加载不产生重复项", () => {
+  beforeEach();
+  const id = snap().newSession();
+  const page = {
+    messages: [{ id: "h-1", role: "user" as const, content: "A", toolCalls: [] }],
+    hasMore: false,
+    nextBefore: 1,
+    total: 1,
+  };
+  snap().replaceMessages(id, page);
+  snap().prependMessages(id, page);
+  snap().prependMessages(id, page);
+  const msgs = snap().sessions.find((x) => x.id === id)!.messages;
+  assert.equal(msgs.length, 1, "同一页重复 prepend 不应重复");
+});
+
+test("消息窗口上限：超过 200 条只保留最近 200 条", () => {
+  beforeEach();
+  const id = snap().newSession();
+  const many = Array.from({ length: 260 }, (_, i) => ({
+    id: `h-${i}`,
+    role: "user" as const,
+    content: `消息 ${i}`,
+    toolCalls: [],
+  }));
+  snap().replaceMessages(id, {
+    messages: many,
+    hasMore: false,
+    nextBefore: 0,
+    total: 260,
+  });
+  const msgs = snap().sessions.find((x) => x.id === id)!.messages;
+  assert.equal(msgs.length, 200, "必须裁剪到窗口上限");
+  assert.equal(msgs[199].id, "h-259", "保留的应是最新的一条");
+  assert.equal(msgs[0].id, "h-60", "最旧的 60 条被裁掉");
+});
+
+test("连续加载更早不会让消息数无限增长", () => {
+  beforeEach();
+  const id = snap().newSession();
+  snap().replaceMessages(id, {
+    messages: Array.from({ length: 200 }, (_, i) => ({
+      id: `n-${i}`,
+      role: "user" as const,
+      content: `新 ${i}`,
+      toolCalls: [],
+    })),
+    hasMore: true,
+    nextBefore: 200,
+    total: 1000,
+  });
+  for (let round = 0; round < 5; round++) {
+    snap().prependMessages(id, {
+      messages: Array.from({ length: 20 }, (_, i) => ({
+        id: `o-${round}-${i}`,
+        role: "user" as const,
+        content: `旧 ${round}-${i}`,
+        toolCalls: [],
+      })),
+      hasMore: true,
+      nextBefore: 100 - round * 20,
+      total: 1000,
+    });
+  }
+  const msgs = snap().sessions.find((x) => x.id === id)!.messages;
+  assert.equal(msgs.length, 200, "反复加载后仍受窗口上限约束");
+});
+
+test("setLoadingMore 只影响目标会话", () => {
+  beforeEach();
+  const a = snap().newSession();
+  const b = snap().newSession();
+  snap().setLoadingMore(a, true);
+  assert.equal(snap().sessions.find((x) => x.id === a)!.loadingMore, true);
+  assert.equal(snap().sessions.find((x) => x.id === b)!.loadingMore, false);
+});
+

@@ -20,6 +20,9 @@ import {
   readFileConfig,
   saveProviders,
   writeFileConfig,
+  PROVIDER_PRESETS,
+  isProviderPreset,
+  type ProviderPreset,
   UnconfiguredProvider,
   UsageError,
 } from "../runtime.js";
@@ -139,8 +142,8 @@ test("saveProviders 持久化多条并记住激活项", async () => {
   const { env, cleanup } = await tempEnv();
   try {
     const list = [
-      { id: "p1", name: "A", baseURL: "https://a.example", apiKey: "sk-a", model: "m-a" },
-      { id: "p2", name: "B", baseURL: "https://b.example", apiKey: "sk-b", model: "m-b" },
+      { id: "p1", name: "A", baseURL: "https://a.example", apiKey: "sk-a", models: ["m-a"], model: "m-a" },
+      { id: "p2", name: "B", baseURL: "https://b.example", apiKey: "sk-b", models: ["m-b"], model: "m-b" },
     ];
     assert.equal(await saveProviders(list, "p2", env), true);
     const cfg = readFileConfig(env);
@@ -160,7 +163,7 @@ test("激活项指向不存在的 id 时回落到第一条", async () => {
   const { env, cleanup } = await tempEnv();
   try {
     await saveProviders(
-      [{ id: "p1", name: "A", baseURL: "https://a.example", apiKey: "sk-a", model: "m" }],
+      [{ id: "p1", name: "A", baseURL: "https://a.example", apiKey: "sk-a", models: ["m"], model: "m" }],
       "missing",
       env,
     );
@@ -370,3 +373,107 @@ async function main(): Promise<void> {
 }
 
 void main();
+
+// --- 多渠道多模型 ---------------------------------------------------------
+
+test("一个渠道可保存多个模型", async () => {
+  const { env, cleanup } = await tempEnv();
+  try {
+    await saveProviders(
+      [
+        {
+          id: "p1",
+          name: "DeepSeek",
+          preset: "deepseek",
+          baseURL: "https://api.deepseek.com",
+          apiKey: "sk-x",
+          models: ["deepseek-chat", "deepseek-reasoner"],
+          model: "deepseek-reasoner",
+        },
+      ],
+      "p1",
+      env,
+    );
+    const cfg = readFileConfig(env);
+    assert.deepEqual(cfg.providers?.[0]?.models, ["deepseek-chat", "deepseek-reasoner"]);
+    assert.equal(cfg.providers?.[0]?.model, "deepseek-reasoner");
+    // 运行时读到的是选中的那个模型
+    assert.equal(readConfig(env).model, "deepseek-reasoner");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("旧版单 model 字段自动升级为 models 数组", async () => {
+  const { env, file, cleanup } = await tempEnv();
+  try {
+    await writeFile(
+      file,
+      JSON.stringify({
+        providers: [
+          { id: "p1", name: "old", baseURL: "https://x.example", apiKey: "k", model: "m1" },
+        ],
+        activeProviderId: "p1",
+      }),
+      "utf8",
+    );
+    const p = readFileConfig(env).providers?.[0];
+    assert.deepEqual(p?.models, ["m1"], "旧 model 应被升级进 models");
+    assert.equal(p?.model, "m1");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("选中的模型不在 models 里时回落到第一个", async () => {
+  const { env, file, cleanup } = await tempEnv();
+  try {
+    await writeFile(
+      file,
+      JSON.stringify({
+        providers: [
+          { id: "p1", baseURL: "https://x.example", apiKey: "k", models: ["a", "b"], model: "不存在" },
+        ],
+        activeProviderId: "p1",
+      }),
+      "utf8",
+    );
+    assert.equal(readFileConfig(env).providers?.[0]?.model, "a");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("models 里的空串与重复项被清理", async () => {
+  const { env, file, cleanup } = await tempEnv();
+  try {
+    await writeFile(
+      file,
+      JSON.stringify({
+        providers: [
+          { id: "p1", baseURL: "https://x.example", apiKey: "k", models: ["a", " a ", "", "b"] },
+        ],
+        activeProviderId: "p1",
+      }),
+      "utf8",
+    );
+    assert.deepEqual(readFileConfig(env).providers?.[0]?.models, ["a", "b"]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("预设常量覆盖常见渠道且有合法 Base URL", () => {
+  const ids: ProviderPreset[] = ["deepseek", "openai", "anthropic", "kimi", "ollama", "custom"];
+  for (const id of ids) {
+    const p = PROVIDER_PRESETS[id];
+    assert.ok(p, `缺少预设 ${id}`);
+    assert.ok(p.name.length > 0);
+    if (id !== "custom") {
+      assert.match(p.baseURL, /^https?:\/\//, `${id} 的 Base URL 不合法`);
+      assert.ok(p.models.length > 0, `${id} 应带推荐模型`);
+    }
+  }
+  assert.equal(isProviderPreset("deepseek"), true);
+  assert.equal(isProviderPreset("nope"), false);
+});
